@@ -1,0 +1,36 @@
+{
+    "chrome_driver_path": null,
+    "headless": true,
+    "wait_timeout": 10,
+    "action_wait": 2,
+    "targets": [
+        {
+            "name": "PF&REIT TRI",
+            "url": "https://www.set.or.th/th/market/index/tri/overview",
+            "actions": [
+                {
+                    "type": "click",
+                    "xpath": "//span[contains(text(), 'PROPCON TRI')]"
+                },
+                {
+                    "type": "get",
+                    "xpath": "//tr[td[contains(., 'PF&REIT TRI')]]/td[2]"
+                }
+            ]
+        },
+        {
+            "name": "RESOURC TRI",
+            "url": "https://www.set.or.th/th/market/index/tri/overview",
+            "actions": [
+                {
+                    "type": "click",
+                    "xpath": "//span[contains(text(), 'RESOURC TRI')]"
+                },
+                {
+                    "type": "get",
+                    "xpath": "//tr[td[contains(., 'ENERG TRI')]]/td[2]"
+                }
+            ]
+        }
+    ]
+}
