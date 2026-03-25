@@ -5,30 +5,27 @@
     "action_wait": 2,
     "targets": [
         {
-            "name": "PF&REIT TRI",
+            "name": "SET TRI",
             "url": "https://www.set.or.th/th/market/index/tri/overview",
             "actions": [
+                {
+                    "type": "get",
+                    "name": "date",
+                    "xpath": "//div[contains(., 'ข้อมูล ณ วันที่')]/span"
+                },
                 {
                     "type": "click",
                     "xpath": "//span[contains(text(), 'PROPCON TRI')]"
                 },
                 {
                     "type": "get",
+                    "name": "PF&REIT TRI",
                     "xpath": "//tr[td[contains(., 'PF&REIT TRI')]]/td[2]"
-                }
-            ]
-        },
-        {
-            "name": "RESOURC TRI",
-            "url": "https://www.set.or.th/th/market/index/tri/overview",
-            "actions": [
-                {
-                    "type": "click",
-                    "xpath": "//span[contains(text(), 'RESOURC TRI')]"
                 },
                 {
                     "type": "get",
-                    "xpath": "//tr[td[contains(., 'ENERG TRI')]]/td[2]"
+                    "name": "SET50 TRI",
+                    "xpath": "//tr[td[contains(., 'SET50 TRI')]]/td[2]"
                 }
             ]
         }

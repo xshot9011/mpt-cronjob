@@ -50,8 +50,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 def execute_actions(driver, target_logger, actions, action_wait):
-    """Execute a list of actions sequentially. Returns the extracted value from the final 'get' action."""
-    result_value = None
+    """Execute a list of actions sequentially. Returns a list of extracted values from 'get' actions."""
+    extracted_values = []
 
     for i, action in enumerate(actions):
         action_type = action.get("type")
@@ -83,7 +83,7 @@ def execute_actions(driver, target_logger, actions, action_wait):
                 time.sleep(action_wait)
             except Exception as e:
                 target_logger.error(f"Step {i + 1}: Click failed: {e}")
-                return None
+                return extracted_values
 
         elif action_type == "get":
             target_logger.info(f"Step {i + 1}: Extracting value...")
@@ -100,14 +100,20 @@ def execute_actions(driver, target_logger, actions, action_wait):
                 else:
                     result_value = str(first_match).strip()
                 target_logger.debug(f"Step {i + 1}: Extracted '{result_value}'")
+                
+                action_name = action.get("name")
+                if action_name:
+                    extracted_values.append({action_name: result_value})
+                else:
+                    extracted_values.append(result_value)
             else:
                 target_logger.error(f"Step {i + 1}: No data found at XPath.")
-                return None
+                extracted_values.append(None)
 
         else:
             target_logger.warning(f"Action {i + 1}: Unknown action type '{action_type}'. Skipping.")
 
-    return result_value
+    return extracted_values
 
 
 def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
@@ -129,15 +135,22 @@ def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
         # Wait for JS content to load
         time.sleep(wait_timeout)
 
-        # Validate that the last action is 'get'
-        if not actions or actions[-1].get("type") != "get":
-            target_logger.error("Invalid actions: The last action must be of type 'get'.")
+        # Validate that there is at least one 'get' action
+        if not actions or not any(a.get("type") == "get" for a in actions):
+            target_logger.error("Invalid actions: Must contain at least one action of type 'get'.")
             return
 
-        result = execute_actions(driver, target_logger, actions, action_wait)
+        results = execute_actions(driver, target_logger, actions, action_wait)
+        
+        successful_results = [r for r in results if r is not None]
 
-        if result is not None:
-            target_logger.info(f"Extraction successful: {name}. Value: {result}")
+        if successful_results:
+            for res in successful_results:
+                if isinstance(res, dict):
+                    for key, val in res.items():
+                        target_logger.info(f"Extraction successful: {name}. {key}: {val}")
+                else:
+                    target_logger.info(f"Extraction successful: {name}. Value: {res}")
         else:
             target_logger.error(f"Extraction failed: {name}.")
 
