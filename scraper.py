@@ -8,27 +8,54 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from lxml import html
+import sys
 
 # --- Configuration ---
 CONFIG_FILE = "config.json"
 LOG_FILE = "scraper_run.log"
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("Scraper")
+def setup_logging():
+    is_lambda = os.environ.get("AWS_LAMBDA_FUNCTION_NAME") is not None
+    handlers = [logging.StreamHandler(sys.stdout)]
+    
+    if not is_lambda:
+        handlers.append(logging.FileHandler(LOG_FILE))
+        
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=handlers
+    )
+    return logging.getLogger("Scraper")
+
+logger = setup_logging()
 
 
 def create_driver(chrome_driver_path=None, headless=True):
-    """Create a Chrome WebDriver instance."""
+    """Create a Chrome WebDriver instance, with specific settings for AWS Lambda if detected."""
+    is_lambda = os.environ.get("AWS_LAMBDA_FUNCTION_NAME") is not None
     chrome_options = Options()
+
+    if is_lambda:
+        # Standard Lambda Chrome options
+        chrome_options.binary_location = "/opt/bin/headless-chromium"
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--single-process")
+        chrome_options.add_argument("--data-path=/tmp/data-path")
+        chrome_options.add_argument("--disk-cache-dir=/tmp/cache-dir")
+        chrome_options.add_argument("--homedir=/tmp")
+        chrome_options.add_argument("--user-data-dir=/tmp/user-data")
+        
+        driver_path = "/opt/bin/chromedriver"
+        service = Service(executable_path=driver_path)
+        return webdriver.Chrome(service=service, options=chrome_options)
+    
+    # Local environment
     if headless:
         chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")

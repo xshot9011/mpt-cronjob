@@ -211,3 +211,8 @@ pyrightconfig.json
 *.log
 venv/
 com.user.mpt-cronjob.plist
+
+# Lambda build outputs
+layer/
+python/
+*.zip
