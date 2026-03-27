@@ -186,13 +186,21 @@ def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
 
 
 def main():
-    if not os.path.exists(CONFIG_FILE):
-        logger.error(f"Configuration file {CONFIG_FILE} not found.")
-        return
-
     try:
-        with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
+        config = None
+        config_env = os.environ.get("CONFIG_JSON")
+        
+        if config_env:
+            logger.info("Loading configuration from environment variable CONFIG_JSON")
+            config = json.loads(config_env)
+        elif os.path.exists(CONFIG_FILE):
+            logger.info(f"Loading configuration from file {CONFIG_FILE}")
+            with open(CONFIG_FILE, "r") as f:
+                config = json.load(f)
+                
+        if not config:
+            logger.error(f"Configuration not found. Please set CONFIG_JSON env var or create {CONFIG_FILE}.")
+            return
 
         chrome_driver_path = config.get("chrome_driver_path")
         headless = config.get("headless", True)

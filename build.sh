@@ -37,7 +37,7 @@ echo "Cleaning up old code zip..."
 rm -f "$CODE_ZIP"
 
 echo "Zipping the Lambda function code..."
-zip "$CODE_ZIP" lambda_function.py scraper.py config.json
+zip "$CODE_ZIP" lambda_function.py scraper.py config.json driver/driver-147-0-7727-24
 
 echo "Done! Layer package created as $ZIP_FILE"
 echo "Done! Lambda code package created as $CODE_ZIP"
