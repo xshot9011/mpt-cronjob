@@ -9,19 +9,32 @@ logger = logging.getLogger("LambdaHandler")
 def lambda_handler(event, context):
     """
     AWS Lambda entry point.
-    Expects config in 'config.json' file or passed via event (optional).
+    Expects config in 'CONFIG_JSON' env var (priority), 'config.json' file, or passed via event (optional).
     """
-    config_file = os.environ.get("CONFIG_FILE", "config.json")
-    
-    if not os.path.exists(config_file):
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": f"Configuration file {config_file} not found."})
-        }
-
     try:
-        with open(config_file, "r") as f:
-            config = json.load(f)
+        config = None
+        config_json_env = os.environ.get("CONFIG_JSON")
+
+        if config_json_env:
+            logger.info("Loading configuration from environment variable CONFIG_JSON")
+            config = json.loads(config_json_env)
+        else:
+            config_file = os.environ.get("CONFIG_FILE", "config.json")
+            if os.path.exists(config_file):
+                logger.info(f"Loading configuration from file {config_file}")
+                with open(config_file, "r") as f:
+                    config = json.load(f)
+            else:
+                return {
+                    "statusCode": 500,
+                    "body": json.dumps({"error": f"Configuration not found. Please set CONFIG_JSON env var or provide {config_file}."})
+                }
+
+        if not config:
+            return {
+                "statusCode": 500,
+                "body": json.dumps({"error": "Configuration is empty."})
+            }
 
         # Allow event to override target list
         targets = event.get("targets", config.get("targets", []))
