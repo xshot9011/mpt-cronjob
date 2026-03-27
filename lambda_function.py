@@ -38,7 +38,7 @@ def lambda_handler(event, context):
 
         # Allow event to override target list
         targets = event.get("targets", config.get("targets", []))
-        chrome_driver_path = config.get("chrome_driver_path")
+        chrome_driver_path = os.path.join(os.environ['LAMBDA_TASK_ROOT'], config.get("chrome_driver_path"))
         headless = config.get("headless", True)
         wait_timeout = config.get("wait_timeout", 15)
         action_wait = config.get("action_wait", 2)
