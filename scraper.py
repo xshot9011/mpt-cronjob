@@ -23,11 +23,9 @@ def setup_logging():
     # Define format: exclude timestamp for Lambda as it provides its own
     if is_lambda:
         log_format = '[%(levelname)s] [%(name)s] %(message)s'
-        # AWS Lambda pre-configures a root logger.
-        root = logging.getLogger()
-        root.setLevel(log_level)
-        for handler in root.handlers:
-            handler.setFormatter(logging.Formatter(log_format))
+        # Force configuration to ensure our format is applied and a handler is present
+        # This handles cases where root.handlers might be empty at import time.
+        logging.basicConfig(level=log_level, format=log_format, force=True)
         return logging.getLogger("Scraper")
         
     log_format = '[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s'
