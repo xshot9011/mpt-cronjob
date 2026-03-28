@@ -20,12 +20,17 @@ def setup_logging():
     log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
     
+    # Define format: exclude timestamp for Lambda as it provides its own
     if is_lambda:
-        # AWS Lambda pre-configures a root logger. basicConfig() does nothing.
-        # We just need to ensure the root logger level is set to INFO.
-        logging.getLogger().setLevel(log_level)
+        log_format = '[%(levelname)s] [%(name)s] %(message)s'
+        # AWS Lambda pre-configures a root logger.
+        root = logging.getLogger()
+        root.setLevel(log_level)
+        for handler in root.handlers:
+            handler.setFormatter(logging.Formatter(log_format))
         return logging.getLogger("Scraper")
         
+    log_format = '[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s'
     handlers = [
         logging.StreamHandler(sys.stdout),
         logging.FileHandler(LOG_FILE)
@@ -33,13 +38,34 @@ def setup_logging():
         
     logging.basicConfig(
         level=log_level,
-        format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
+        format=log_format,
         datefmt='%Y-%m-%d %H:%M:%S',
         handlers=handlers
     )
     return logging.getLogger("Scraper")
 
 logger = setup_logging()
+
+
+def load_config():
+    """
+    Load configuration from the CONFIG_JSON environment variable (highest priority),
+    or fall back to the file pointed to by CONFIG_FILE env var (default: config.json).
+
+    Returns the parsed config dict, or None if no config could be found.
+    """
+    config_json_env = os.environ.get("CONFIG_JSON")
+    if config_json_env:
+        logger.info("Loading configuration from environment variable CONFIG_JSON")
+        return json.loads(config_json_env)
+
+    config_file = os.environ.get("CONFIG_FILE", CONFIG_FILE)
+    if os.path.exists(config_file):
+        logger.info(f"Loading configuration from file {config_file}")
+        with open(config_file, "r") as f:
+            return json.load(f)
+
+    return None
 
 
 def create_driver(chrome_driver_path=None, headless=True):
@@ -199,17 +225,8 @@ def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
 
 def main():
     try:
-        config = None
-        config_env = os.environ.get("CONFIG_JSON")
-        
-        if config_env:
-            logger.info("Loading configuration from environment variable CONFIG_JSON")
-            config = json.loads(config_env)
-        elif os.path.exists(CONFIG_FILE):
-            logger.info(f"Loading configuration from file {CONFIG_FILE}")
-            with open(CONFIG_FILE, "r") as f:
-                config = json.load(f)
-                
+        config = load_config()
+
         if not config:
             logger.error(f"Configuration not found. Please set CONFIG_JSON env var or create {CONFIG_FILE}.")
             return

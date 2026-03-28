@@ -1,7 +1,7 @@
 import json
 import os
 import logging
-from scraper import create_driver, scrape_target, setup_logging
+from scraper import create_driver, scrape_target, setup_logging, load_config
 
 # Reuse the logger configuration from scraper.py or set up new one
 logger = setup_logging()
@@ -12,28 +12,12 @@ def lambda_handler(event, context):
     Expects config in 'CONFIG_JSON' env var (priority), 'config.json' file, or passed via event (optional).
     """
     try:
-        config = None
-        config_json_env = os.environ.get("CONFIG_JSON")
-        
-        if config_json_env:
-            logger.info("Loading configuration from environment variable CONFIG_JSON")
-            config = json.loads(config_json_env)
-        else:
-            config_file = os.environ.get("CONFIG_FILE", "config.json")
-            if os.path.exists(config_file):
-                logger.info(f"Loading configuration from file {config_file}")
-                with open(config_file, "r") as f:
-                    config = json.load(f)
-            else:
-                return {
-                    "statusCode": 500,
-                    "body": json.dumps({"error": f"Configuration not found. Please set CONFIG_JSON env var or provide {config_file}."})
-                }
+        config = load_config()
 
         if not config:
             return {
                 "statusCode": 500,
-                "body": json.dumps({"error": "Configuration is empty."})
+                "body": json.dumps({"error": "Configuration not found. Please set CONFIG_JSON env var or provide a config file."})
             }
 
         # Allow event to override target list
