@@ -212,6 +212,9 @@ pyrightconfig.json
 venv/
 com.user.mpt-cronjob.plist
 
+driver/
+headless
+
 # Lambda build outputs
 layer/
 layer_lib/
