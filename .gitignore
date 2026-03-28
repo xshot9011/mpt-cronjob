@@ -213,12 +213,4 @@ venv/
 com.user.mpt-cronjob.plist
 
 driver/
-# headless/
-
-# Lambda build outputs
-layer/
-layer_lib/
-layer_driver/
-layer_bin/
-python/
-web-scraper-*.zip
+headless/
