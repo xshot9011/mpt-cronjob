@@ -4,8 +4,9 @@ A Python scraper script designed to be run as a macOS `launchd` cron job every d
 
 ## Prerequisites
 
-- **Google Chrome** must be installed.
+- **Google Chrome** must be installed (for local usage).
 - **ChromeDriver** binary placed in this project folder (or update the path in `config.json`).
+  - You can find and download specific versions of Chrome and ChromeDriver from the [Chrome for Testing availability dashboard](https://googlechromelabs.github.io/chrome-for-testing/).
 
 ## Setup
 

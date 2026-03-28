@@ -17,13 +17,22 @@ LOG_FILE = "scraper_run.log"
 # Configure logging
 def setup_logging():
     is_lambda = os.environ.get("AWS_LAMBDA_FUNCTION_NAME") is not None
-    handlers = [logging.StreamHandler(sys.stdout)]
+    log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
     
-    if not is_lambda:
-        handlers.append(logging.FileHandler(LOG_FILE))
+    if is_lambda:
+        # AWS Lambda pre-configures a root logger. basicConfig() does nothing.
+        # We just need to ensure the root logger level is set to INFO.
+        logging.getLogger().setLevel(log_level)
+        return logging.getLogger("Scraper")
+        
+    handlers = [
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE)
+    ]
         
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
         handlers=handlers
@@ -40,17 +49,20 @@ def create_driver(chrome_driver_path=None, headless=True):
 
     if is_lambda:
         # Standard Lambda Chrome options
-        chrome_options.binary_location = "/opt/bin/headless-chromium"
-        chrome_options.add_argument("--headless")
+        chrome_options.binary_location = "/opt/bin/headless-chromium/chrome-headless-shell"
+        chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-tools")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-zygote")
         chrome_options.add_argument("--single-process")
         chrome_options.add_argument("--data-path=/tmp/data-path")
         chrome_options.add_argument("--disk-cache-dir=/tmp/cache-dir")
-        chrome_options.add_argument("--homedir=/tmp")
-        chrome_options.add_argument("--user-data-dir=/tmp/user-data")
-        
+        chrome_options.add_argument("--remote-debugging-pipe")
+        chrome_options.add_argument("--verbose")
+        chrome_options.add_argument("--log-path=/tmp")
+
         driver_path = "/opt/bin/chromedriver"
         service = Service(executable_path=driver_path)
         return webdriver.Chrome(service=service, options=chrome_options)

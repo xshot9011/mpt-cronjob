@@ -214,5 +214,8 @@ com.user.mpt-cronjob.plist
 
 # Lambda build outputs
 layer/
+layer_lib/
+layer_driver/
+layer_bin/
 python/
-*.zip
+web-scraper-*.zip

@@ -5,6 +5,8 @@ from scraper import create_driver, scrape_target
 
 # Reuse the logger configuration from scraper.py or set up new one
 logger = logging.getLogger("LambdaHandler")
+log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
+logger.setLevel(getattr(logging, log_level_str, logging.INFO))
 
 def lambda_handler(event, context):
     """
@@ -14,7 +16,7 @@ def lambda_handler(event, context):
     try:
         config = None
         config_json_env = os.environ.get("CONFIG_JSON")
-
+        
         if config_json_env:
             logger.info("Loading configuration from environment variable CONFIG_JSON")
             config = json.loads(config_json_env)
@@ -38,7 +40,7 @@ def lambda_handler(event, context):
 
         # Allow event to override target list
         targets = event.get("targets", config.get("targets", []))
-        chrome_driver_path = os.path.join(os.environ['LAMBDA_TASK_ROOT'], config.get("chrome_driver_path"))
+        chrome_driver_path = config.get("chrome_driver_path")
         headless = config.get("headless", True)
         wait_timeout = config.get("wait_timeout", 15)
         action_wait = config.get("action_wait", 2)
