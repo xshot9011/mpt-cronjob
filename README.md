@@ -1,70 +1,127 @@
 # mpt-cronjob
 
-A Python scraper script designed to be run as a macOS `launchd` cron job every day at 1 PM. Uses Selenium with headless Chrome to handle JavaScript-rendered pages.
+A Selenium-based web scraper built for both local environments (macOS/Linux) and cloud deployment (AWS Lambda as a container). 
 
-## Prerequisites
+## 🚀 Overview
 
-- **Google Chrome** must be installed (for local usage).
-- **ChromeDriver** binary placed in this project folder (or update the path in `config.json`).
-  - You can find and download specific versions of Chrome and ChromeDriver from the [Chrome for Testing availability dashboard](https://googlechromelabs.github.io/chrome-for-testing/).
+- **Engine**: Selenium with Chrome Headless Shell.
+- **Support**: 
+  - **Local**: Scheduled via macOS `launchd` or ran manually.
+  - **Cloud**: Packaged as a Docker container for AWS Lambda.
+- **Dynamic Config**: Loads targets and actions from environment variables or a JSON file.
 
-## Setup
+---
 
-### 1. Create a Virtual Environment
-```bash
-python3 -m venv venv
-```
+## 🛠 Prerequisites
 
-### 2. Activate and Install Dependencies
-Activate the virtual environment and install the required libraries using `pip3`:
-```bash
-source venv/bin/activate
-pip3 install -r requirements.txt
-```
+### For Local Usage:
+- **Google Chrome** installed.
+- **ChromeDriver** binary placed in the project root or accessible via system path.
+  - Download from: [Chrome for Testing dashboard](https://googlechromelabs.github.io/chrome-for-testing/).
+- **Python 3.9+**
 
-### 3. Configure Scraping Targets
-Edit `config.json` to define your scraping steps. You can specify a sequence of `actions` (e.g., `click` then `get`):
-```json
-{
-    "chrome_driver_path": null,
-    "headless": true,
-    "wait_timeout": 10,
-    "action_wait": 2,
-    "targets": [
-        {
+### For AWS Lambda (Container):
+- **Docker** installed and running.
+- **AWS CLI** configured with appropriate permissions.
+
+---
+
+## 💻 Local Setup
+
+1. **Create and Activate Virtual Environment**:
+  ```bash
+  python3 -m venv venv
+  source venv/bin/activate
+  ```
+
+2. **Install Dependencies**:
+  ```bash
+  source venv/bin/activate
+  pip3 install -r requirements.txt
+  ```
+
+3. **Configure Targets (`config.json`)**:
+   Define `targets` with a sequence of `actions` (`click` and `get`):
+   ```json
+   {
+     "chrome_driver_path": null,
+     "headless": true,
+     "wait_timeout": 15,
+     "action_wait": 2,
+     "targets": [
+       {
             "name": "PF&REIT TRI",
             "url": "https://www.set.or.th/th/market/index/tri/overview",
-            "actions": [
+         "actions": [
                 { "type": "click", "xpath": "//span[contains(text(), 'PROPCON TRI')]" },
                 { "type": "get", "xpath": "//tr[td[contains(., 'PF&REIT TRI')]]/td[2]" }
-            ]
-        }
-    ]
-}
+         ]
+       }
+     ]
+   }
+   ```
+
+4. **Run Manually**:
+   ```bash
+   python scraper.py
+   ```
+
+---
+
+## ☁️ AWS Lambda Deployment (Docker)
+
+The project includes a `Dockerfile` optimized for AWS Lambda (AL2023) using Python 3.13.
+
+### 1. Build and Tag Image
+Use the provided script to build the image (defaults to `linux/amd64`):
+```bash
+./build_image.sh
 ```
 
-### 4. Run the Scraper Manually
-Verify the script works:
+### 2. Push to AWS ECR
 ```bash
-./venv/bin/python3 scraper.py
+# Login to ECR
+aws ecr get-login-password --region <REGION> | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com
+
+# Push image
+docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/mpt-staging-web-scraper:latest
 ```
 
-### 5. Schedule with launchd (macOS)
-Use the helper script to generate the `.plist` file with the correct absolute paths for your environment:
+### 3. Lambda Configuration
+When creating the Lambda function from the container image:
+- **Environment Variables**:
+  - `CONFIG_JSON`: (Optional) Paste the entire config JSON here for highest priority.
+  - `CONFIG_FILE`: (Optional) Defaults to `config.json`.
+  - `LOG_LEVEL`: `INFO`, `DEBUG`, `ERROR` (defaults to `INFO`).
+- **Memory/Timeout**: Recommend 1024MB+ memory and 3-5 minute timeout depending on targets.
 
-```bash
-python3 setup_cron.py --hour 13 --minute 0
-```
+---
 
-Then copy and load the agent:
+## ⚙️ Configuration Loading Logic
+
+The code uses a shared `load_config()` function in `scraper.py` which searches in this order:
+1. `CONFIG_JSON` environment variable (stringified JSON).
+2. `CONFIG_FILE` environment variable (path to file).
+3. Local `config.json` file.
+
+---
+
+## 📝 Logging
+
+- **Local**: Logs are written to `scraper_run.log` and standard output with timestamps.
+- **AWS Lambda**: Logs are optimized for CloudWatch; local timestamps are removed to avoid redundancy as Lambda prepends its own. Use `LOG_LEVEL` environment variable to control verbosity.
+
+---
+
+## 📅 Scheduling
+
+### macOS (launchd)
+Use the helper script to generate the `.plist` file:
 ```bash
+python setup_cron.py --hour 13 --minute 0
 cp com.user.mpt-cronjob.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.user.mpt-cronjob.plist
 ```
-> [!NOTE]
-> If your computer is shut down at the scheduled time, macOS will automatically run the job as soon as it starts up or wakes up.
 
-## Logs
-- `scraper_run.log`: Application logs with INFO and ERROR levels.
-- `stdout.log`: Standard output from launchd.
-- `stderr.log`: Error output from launchd.
+### AWS Lambda
+Schedule via **Amazon EventBridge (Scheduler)** using a cron expression (e.g., `cron(0 13 * * ? *)`).
