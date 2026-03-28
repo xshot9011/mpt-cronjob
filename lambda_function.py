@@ -1,12 +1,10 @@
 import json
 import os
 import logging
-from scraper import create_driver, scrape_target
+from scraper import create_driver, scrape_target, setup_logging
 
 # Reuse the logger configuration from scraper.py or set up new one
-logger = logging.getLogger("LambdaHandler")
-log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
-logger.setLevel(getattr(logging, log_level_str, logging.INFO))
+logger = setup_logging()
 
 def lambda_handler(event, context):
     """
