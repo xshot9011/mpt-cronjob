@@ -9,6 +9,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from lxml import html
 import sys
+import requests
 
 # --- Configuration ---
 CONFIG_FILE = "config.json"
@@ -201,24 +202,57 @@ def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
         # Validate that there is at least one 'get' action
         if not actions or not any(a.get("type") == "get" for a in actions):
             target_logger.error("Invalid actions: Must contain at least one action of type 'get'.")
-            return
+            return []
 
         results = execute_actions(driver, target_logger, actions, action_wait)
         
         successful_results = [r for r in results if r is not None]
 
+        extracted_items = []
         if successful_results:
             for res in successful_results:
                 if isinstance(res, dict):
                     for key, val in res.items():
                         target_logger.info(f"Extraction successful: {name}. {key}: {val}")
+                        extracted_items.append((f"{name} - {key}", val))
                 else:
                     target_logger.info(f"Extraction successful: {name}. Value: {res}")
+                    extracted_items.append((name, res))
+            return extracted_items
         else:
             target_logger.error(f"Extraction failed: {name}.")
+            return []
 
     except Exception as e:
         target_logger.error(f"An unexpected error occurred: {e}")
+        return []
+
+import html as html_escape
+
+def send_telegram_message(bot_token, chat_id, results):
+    if not bot_token or not chat_id or not results:
+        return
+    
+    blocks = []
+    for name, value in results:
+        safe_name = html_escape.escape(str(name))
+        safe_value = html_escape.escape(str(value))
+        blocks.append(f"{safe_name}\n<pre>{safe_value}</pre>")
+    
+    message = "\n".join(blocks)
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    
+    try:
+        response = requests.post(
+            url,
+            json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
+            headers={'Content-Type': 'application/json'}
+        )
+        response.raise_for_status()
+        logger.info("Successfully sent Telegram message.")
+    except requests.exceptions.RequestException as e:
+        error_msg = e.response.text if e.response is not None else str(e)
+        logger.error(f"Failed to send Telegram message: {error_msg}")
 
 
 def main():
@@ -242,6 +276,7 @@ def main():
         logger.info(f"Starting scraping process for {len(targets)} targets.")
 
         driver = create_driver(chrome_driver_path, headless)
+        all_results = []
         try:
             for target in targets:
                 name = target.get("name", "UnnamedTarget")
@@ -249,7 +284,9 @@ def main():
                 actions = target.get("actions", [])
 
                 if url and actions:
-                    scrape_target(driver, name, url, actions, wait_timeout, action_wait)
+                    target_results = scrape_target(driver, name, url, actions, wait_timeout, action_wait)
+                    if target_results:
+                        all_results.extend(target_results)
                 else:
                     logger.warning(f"Skipping target '{name}': Missing URL or actions.")
         finally:
@@ -257,6 +294,11 @@ def main():
             logger.info("Browser closed.")
 
         logger.info("All scraping tasks processed.")
+        
+        telegram_bot_token = config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN")
+        telegram_chat_id = config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID")
+        if telegram_bot_token and telegram_chat_id and all_results:
+            send_telegram_message(telegram_bot_token, telegram_chat_id, all_results)
 
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse config.json: {e}")

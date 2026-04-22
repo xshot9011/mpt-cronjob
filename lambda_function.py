@@ -1,7 +1,7 @@
 import json
 import os
 import logging
-from scraper import create_driver, scrape_target, setup_logging, load_config
+from scraper import create_driver, scrape_target, setup_logging, load_config, send_telegram_message
 
 # Reuse the logger configuration from scraper.py or set up new one
 logger = setup_logging()
@@ -36,7 +36,7 @@ def lambda_handler(event, context):
         logger.info(f"Starting Lambda scraping for {len(targets)} targets.")
         
         driver = create_driver(chrome_driver_path, headless)
-        results = []
+        all_results = []
         
         try:
             for target in targets:
@@ -45,12 +45,19 @@ def lambda_handler(event, context):
                 actions = target.get("actions", [])
 
                 if url and actions:
-                    # scrape_target logs results internally
-                    scrape_target(driver, name, url, actions, wait_timeout, action_wait)
+                    # scrape_target logs results internally and now returns them
+                    target_results = scrape_target(driver, name, url, actions, wait_timeout, action_wait)
+                    if target_results:
+                        all_results.extend(target_results)
                 else:
                     logger.warning(f"Skipping target '{name}': Missing URL or actions.")
         finally:
             driver.quit()
+
+        telegram_bot_token = config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN")
+        telegram_chat_id = config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID")
+        if telegram_bot_token and telegram_chat_id and all_results:
+            send_telegram_message(telegram_bot_token, telegram_chat_id, all_results)
 
         return {
             "statusCode": 200,
