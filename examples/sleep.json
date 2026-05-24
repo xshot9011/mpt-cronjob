@@ -1,0 +1,33 @@
+{
+    "chrome_driver_path": null,
+    "headless": true,
+    "keep_browser_open": false,
+    "wait_timeout": 5,
+    "action_wait": 2,
+    "targets": [
+        {
+            "name": "Sleep between actions",
+            "url": "https://example.com",
+            "actions": [
+                {
+                    "type": "sleep",
+                    "duration": "5s"
+                },
+                {
+                    "type": "get",
+                    "name": "heading_after_5s",
+                    "xpath": "//h1"
+                },
+                {
+                    "type": "sleep",
+                    "duration": "1m"
+                },
+                {
+                    "type": "get",
+                    "name": "heading_after_1m",
+                    "xpath": "//h1"
+                }
+            ]
+        }
+    ]
+}
