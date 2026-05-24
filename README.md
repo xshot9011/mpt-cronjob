@@ -40,29 +40,20 @@ A Selenium-based web scraper built for both local environments (macOS/Linux) and
   pip3 install -r requirements.txt
   ```
 
-3. **Configure Targets (`config.json`)**:
-   Define `targets` with a sequence of `actions` (`click` and `get`):
-   ```json
-   {
-     "chrome_driver_path": null,
-     "headless": true,
-     "wait_timeout": 15,
-     "action_wait": 2,
-     "targets": [
-       {
-            "name": "PF&REIT TRI",
-            "url": "https://www.set.or.th/th/market/index/tri/overview",
-         "actions": [
-                { "type": "click", "xpath": "//span[contains(text(), 'PROPCON TRI')]" },
-                { "type": "get", "xpath": "//tr[td[contains(., 'PF&REIT TRI')]]/td[2]" }
-         ]
-       }
-     ]
-   }
-   ```
+3. **Configure Targets**:
+   Define `targets` with a sequence of `actions` (`click`, `get`, `fill`) in a JSON file. 
+   Check the `examples/` directory for sample configurations:
+   - `examples/simple.json` - Basic `click` and `get` actions.
+   - `examples/local.json` - Demonstrates `fill` action using raw strings.
+   - `examples/local-secret-manager.json` - Demonstrates `fill` action integrating with AWS Secrets Manager.
 
 4. **Run Manually**:
+   You can run the scraper by pointing the `CONFIG_FILE` environment variable to your desired configuration:
    ```bash
+   # Using a specific config file
+   CONFIG_FILE=examples/local.json python scraper.py
+   
+   # Or using default config.json
    python scraper.py
    ```
 
@@ -99,10 +90,20 @@ When creating the Lambda function from the container image:
 
 ## ⚙️ Configuration Loading Logic
 
+### Configuration Source
 The code uses a shared `load_config()` function in `scraper.py` which searches in this order:
 1. `CONFIG_JSON` environment variable (stringified JSON).
 2. `CONFIG_FILE` environment variable (path to file).
 3. Local `config.json` file.
+
+### Dynamic Value Resolution
+For certain configuration fields (e.g., the `fill` action's `value_from`, `telegram_bot_token`, and `telegram_chat_id`), the scraper supports dynamic value resolution using the following syntax:
+
+- **AWS Secrets Manager**: `secret_manager['<secret_name_or_arn>']['<json_key>']`
+  *Example*: `"secret_manager['my-credentials']['password']"` fetches the `password` key from the `my-credentials` secret.
+- **Raw Strings**: `string['<value>']`
+  *Example*: `"string['my_hardcoded_value']"` will be parsed directly as `"my_hardcoded_value"`.
+- **Plain Values**: Any value not matching the above syntax will be evaluated exactly as provided.
 
 ---
 
