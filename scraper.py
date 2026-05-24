@@ -89,6 +89,8 @@ def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=Fals
         chrome_options.add_argument("--remote-debugging-pipe")
         chrome_options.add_argument("--verbose")
         chrome_options.add_argument("--log-path=/tmp")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
 
         driver_path = "/opt/bin/chromedriver"
         service = Service(executable_path=driver_path)
@@ -105,7 +107,8 @@ def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=Fals
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
 
     if chrome_driver_path:
         service = Service(executable_path=chrome_driver_path)
@@ -241,10 +244,12 @@ def execute_actions(driver, target_logger, actions, action_wait):
                 target_logger.debug(f"Step {i + 1}: Extracted '{result_value}'")
                 
                 action_name = action.get("name")
+                options = action.get("telegram_message_options", [])
+                
+                item = {"value": result_value, "options": options}
                 if action_name:
-                    extracted_values.append({action_name: result_value})
-                else:
-                    extracted_values.append(result_value)
+                    item["name"] = action_name
+                extracted_values.append(item)
             else:
                 target_logger.error(f"Step {i + 1}: No data found at XPath.")
                 extracted_values.append(None)
@@ -285,13 +290,23 @@ def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
         extracted_items = []
         if successful_results:
             for res in successful_results:
-                if isinstance(res, dict):
+                if isinstance(res, dict) and "value" in res:
+                    val = res["value"]
+                    options = res.get("options", [])
+                    if "name" in res:
+                        res_name = res["name"]
+                        target_logger.info(f"Extraction successful: {name}. {res_name}: {val}")
+                        extracted_items.append((f"{name} - {res_name}", val, options))
+                    else:
+                        target_logger.info(f"Extraction successful: {name}. Value: {val}")
+                        extracted_items.append((name, val, options))
+                elif isinstance(res, dict):
                     for key, val in res.items():
                         target_logger.info(f"Extraction successful: {name}. {key}: {val}")
-                        extracted_items.append((f"{name} - {key}", val))
+                        extracted_items.append((f"{name} - {key}", val, []))
                 else:
                     target_logger.info(f"Extraction successful: {name}. Value: {res}")
-                    extracted_items.append((name, res))
+                    extracted_items.append((name, res, []))
             return extracted_items
         else:
             target_logger.error(f"Extraction failed: {name}.")
@@ -308,10 +323,29 @@ def send_telegram_message(bot_token, chat_id, results):
         return
     
     blocks = []
-    for name, value in results:
+    for item in results:
+        if len(item) == 3:
+            name, value, options = item
+        else:
+            name, value = item
+            options = []
+
         safe_name = html_escape.escape(str(name))
         safe_value = html_escape.escape(str(value))
-        blocks.append(f"{safe_name}\n<pre>{safe_value}</pre>")
+        
+        no_codeblock = False
+        other_options = {}
+        if isinstance(options, list):
+            for opt in options:
+                if opt == "--no-codeblock":
+                    no_codeblock = True
+                elif isinstance(opt, dict):
+                    other_options.update(opt)
+                    
+        if no_codeblock:
+            blocks.append(f"{safe_name}\n{safe_value}")
+        else:
+            blocks.append(f"{safe_name}\n<pre>{safe_value}</pre>")
     
     message = "\n".join(blocks)
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -354,6 +388,11 @@ def main():
         logger.info(f"Starting scraping process for {len(targets)} targets.")
 
         driver = create_driver(chrome_driver_path, headless, keep_browser_open)
+        driver.execute_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            })
+        """)
         all_results = []
         try:
             for target in targets:
