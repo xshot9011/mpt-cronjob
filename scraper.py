@@ -301,7 +301,9 @@ def execute_actions(driver, target_logger, actions, action_wait):
             target_logger.info(f"Step {i + 1}: Sleep complete.")
             continue
 
-        if not xpath:
+        # Script-based 'get' actions do not require an xpath
+        is_script_get = action_type == "get" and action.get("script")
+        if not xpath and not is_script_get:
             target_logger.error(f"Action {i + 1}: Missing 'xpath' for action type '{action_type}'. Skipping.")
             continue
 
@@ -386,30 +388,53 @@ def execute_actions(driver, target_logger, actions, action_wait):
 
         elif action_type == "get":
             target_logger.info(f"Step {i + 1}: Extracting value...")
-            page_source = driver.page_source
-            tree = html.fromstring(page_source)
-            result = tree.xpath(xpath)
+            script = action.get("script")
 
-            if result:
-                first_match = result[0]
-                if hasattr(first_match, 'text_content'):
-                    result_value = first_match.text_content().strip()
-                elif hasattr(first_match, 'strip'):
-                    result_value = first_match.strip()
-                else:
-                    result_value = str(first_match).strip()
-                target_logger.debug(f"Step {i + 1}: Extracted '{result_value}'")
-                
-                action_name = action.get("name")
-                options = action.get("telegram_message_options", [])
-                
-                item = {"value": result_value, "options": options}
-                if action_name:
-                    item["name"] = action_name
-                extracted_values.append(item)
+            if script:
+                # --- Script-based extraction ---
+                try:
+                    result_value = driver.execute_script(script)
+                    if result_value is None:
+                        result_value = ""
+                    result_value = str(result_value).strip()
+                    target_logger.debug(f"Step {i + 1}: Script extracted '{result_value}'")
+
+                    action_name = action.get("name")
+                    options = action.get("telegram_message_options", [])
+
+                    item = {"value": result_value, "options": options}
+                    if action_name:
+                        item["name"] = action_name
+                    extracted_values.append(item)
+                except Exception as e:
+                    target_logger.error(f"Step {i + 1}: Script execution failed: {e}")
+                    extracted_values.append(None)
             else:
-                target_logger.error(f"Step {i + 1}: No data found at XPath.")
-                extracted_values.append(None)
+                # --- XPath-based extraction ---
+                page_source = driver.page_source
+                tree = html.fromstring(page_source)
+                result = tree.xpath(xpath)
+
+                if result:
+                    first_match = result[0]
+                    if hasattr(first_match, 'text_content'):
+                        result_value = first_match.text_content().strip()
+                    elif hasattr(first_match, 'strip'):
+                        result_value = first_match.strip()
+                    else:
+                        result_value = str(first_match).strip()
+                    target_logger.debug(f"Step {i + 1}: Extracted '{result_value}'")
+
+                    action_name = action.get("name")
+                    options = action.get("telegram_message_options", [])
+
+                    item = {"value": result_value, "options": options}
+                    if action_name:
+                        item["name"] = action_name
+                    extracted_values.append(item)
+                else:
+                    target_logger.error(f"Step {i + 1}: No data found at XPath.")
+                    extracted_values.append(None)
 
         else:
             target_logger.warning(f"Action {i + 1}: Unknown action type '{action_type}'. Skipping.")
