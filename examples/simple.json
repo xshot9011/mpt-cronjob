@@ -1,6 +1,7 @@
 {
     "chrome_driver_path": null,
     "headless": true,
+    "keep_browser_open": true,
     "wait_timeout": 10,
     "action_wait": 2,
     "targets": [

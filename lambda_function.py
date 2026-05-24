@@ -1,7 +1,7 @@
 import json
 import os
 import logging
-from scraper import create_driver, scrape_target, setup_logging, load_config, send_telegram_message
+from scraper import create_driver, scrape_target, setup_logging, load_config, send_telegram_message, resolve_value
 
 # Reuse the logger configuration from scraper.py or set up new one
 logger = setup_logging()
@@ -54,8 +54,8 @@ def lambda_handler(event, context):
         finally:
             driver.quit()
 
-        telegram_bot_token = config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN")
-        telegram_chat_id = config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID")
+        telegram_bot_token = resolve_value(config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN"), logger)
+        telegram_chat_id = resolve_value(config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID"), logger)
         if telegram_bot_token and telegram_chat_id and all_results:
             send_telegram_message(telegram_bot_token, telegram_chat_id, all_results)
 
