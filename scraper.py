@@ -12,6 +12,8 @@ import sys
 import requests
 import re
 import boto3
+import random
+from selenium.webdriver import ActionChains
 
 # --- Configuration ---
 CONFIG_FILE = os.environ.get("CONFIG_FILE", "config.json")
@@ -118,6 +120,67 @@ def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=Fals
 
     return driver
 
+def random_mouse_movements(driver, duration=5, interval=0.2):
+    """
+    Simulate random mouse movements over the page to mimic human interaction.
+    Parameters:
+        driver: Selenium WebDriver instance.
+        duration: Total time in seconds to perform movements.
+        interval: Time between movements in seconds.
+    """
+    try:
+        is_lambda = os.environ.get("AWS_LAMBDA_FUNCTION_NAME") is not None
+        if is_lambda:
+            # In Lambda the display is headless; use JavaScript to dispatch mousemove events
+            end_time = time.time() + duration
+            while time.time() < end_time:
+                # Random coordinates within the viewport
+                viewport = driver.get_window_size()
+                width = viewport.get('width', 1920)
+                height = viewport.get('height', 1080)
+                x = random.randint(0, max(width - 1, 0))
+                y = random.randint(0, max(height - 1, 0))
+                # Dispatch a mousemove event at (x, y)
+                script = """
+                var ev = new MouseEvent('mousemove', {
+                    view: window,
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: %d,
+                    clientY: %d
+                });
+                document.elementFromPoint(%d, %d).dispatchEvent(ev);
+                """ % (x, y, x, y)
+                try:
+                    driver.execute_script(script)
+                except Exception as js_err:
+                    logger.debug(f"JS mouse move error: {js_err}")
+                time.sleep(interval)
+            return
+        # Non-Lambda (local) environment – use ActionChains with body element
+        viewport = driver.get_window_size()
+        viewport_width = viewport.get('width', 1920)
+        viewport_height = viewport.get('height', 1080)
+        body = driver.find_element(By.TAG_NAME, 'body')
+        body_size = body.size
+        width = int(body_size.get('width', viewport_width))
+        height = int(body_size.get('height', viewport_height))
+        end_time = time.time() + duration
+        while time.time() < end_time:
+            x_offset = random.randint(0, max(width - 1, 0))
+            y_offset = random.randint(0, max(height - 1, 0))
+            try:
+                ActionChains(driver).move_to_element_with_offset(body, x_offset, y_offset).perform()
+            except Exception as move_err:
+                logger.debug(f"Random mouse move out of bounds ({x_offset},{y_offset}): {move_err}")
+                try:
+                    ActionChains(driver).move_to_element_with_offset(body, 0, 0).perform()
+                except Exception:
+                    pass
+            time.sleep(interval)
+    except Exception as e:
+        logger.warning(f"Random mouse movement encountered an error: {e}")
+
 
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -141,6 +204,29 @@ def get_secret(secret_name, key):
         except json.JSONDecodeError:
             return None
     return None
+
+def parse_duration(duration) -> float:
+    """
+    Parse a duration value into seconds (float).
+    Accepts:
+        - A number (int/float) treated as seconds.
+        - A string with an optional unit suffix:
+            '30'   -> 30 s
+            '30s'  -> 30 s
+            '2m'   -> 120 s
+            '1h'   -> 3600 s
+    """
+    if isinstance(duration, (int, float)):
+        return float(duration)
+    s = str(duration).strip().lower()
+    if s.endswith('h'):
+        return float(s[:-1]) * 3600
+    if s.endswith('m'):
+        return float(s[:-1]) * 60
+    if s.endswith('s'):
+        return float(s[:-1])
+    return float(s)
+
 
 def resolve_value(value_str, error_logger=logger):
     if not isinstance(value_str, str):
@@ -172,33 +258,77 @@ def execute_actions(driver, target_logger, actions, action_wait):
     for i, action in enumerate(actions):
         action_type = action.get("type")
         xpath = action.get("xpath")
+        continue_on_failure = action.get("continue_on_failure", False)
 
-        if not action_type or not xpath:
-            target_logger.error(f"Action {i + 1}: Missing 'type' or 'xpath'. Skipping.")
+        if not action_type:
+            target_logger.error(f"Action {i + 1}: Missing 'type'. Skipping.")
+            continue
+
+        # Actions that do not require an xpath element
+        if action_type == "sleep":
+            raw_duration = action.get("duration", 0)
+            try:
+                seconds = parse_duration(raw_duration)
+            except (ValueError, TypeError) as e:
+                target_logger.error(f"Step {i + 1}: Invalid sleep duration '{raw_duration}': {e}. Skipping.")
+                continue
+            target_logger.info(f"Step {i + 1}: Sleeping for {seconds}s...")
+            time.sleep(seconds)
+            target_logger.info(f"Step {i + 1}: Sleep complete.")
+            continue
+
+        if not xpath:
+            target_logger.error(f"Action {i + 1}: Missing 'xpath' for action type '{action_type}'. Skipping.")
             continue
 
         if action_type == "click":
-            target_logger.info(f"Step {i + 1}: Clicking element...")
+            iframe_title = action.get("iframe_title")
+            target_logger.info(f"Step {i + 1}: Clicking element{'  (inside iframe: ' + iframe_title + ')' if iframe_title else ''}...")
             try:
-                # Wait for element to be present in DOM
-                wait = WebDriverWait(driver, 15)
-                element = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
-                
-                # Scroll element into the center of the viewport
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-                time.sleep(1) # Wait for scrolling to finish
-                
-                # Attempt standard click, fallback to javascript click
+                if iframe_title:
+                    # Switch into the iframe identified by its title attribute
+                    wait = WebDriverWait(driver, 15)
+                    iframe_element = wait.until(
+                        EC.presence_of_element_located(
+                            (By.XPATH, f"//iframe[@title='{iframe_title}']")
+                        )
+                    )
+                    driver.switch_to.frame(iframe_element)
+                    target_logger.info(f"Step {i + 1}: Switched into iframe '{iframe_title}'.")
+
                 try:
-                    element.click()
-                except Exception as click_err:
-                    target_logger.warning(f"Step {i + 1}: Standard click failed, using Javascript fallback.")
-                    driver.execute_script("arguments[0].click();", element)
-                    
-                target_logger.info(f"Step {i + 1}: Click successful. Waiting {action_wait}s...")
-                time.sleep(action_wait)
+                    # Wait for element to be present in DOM (inside iframe if applicable)
+                    wait = WebDriverWait(driver, 15)
+                    element = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+
+                    # Scroll element into the center of the viewport
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                    time.sleep(1)  # Wait for scrolling to finish
+
+                    # Attempt standard click, fallback to javascript click
+                    try:
+                        element.click()
+                    except Exception:
+                        target_logger.warning(f"Step {i + 1}: Standard click failed, using Javascript fallback.")
+                        driver.execute_script("arguments[0].click();", element)
+
+                    target_logger.info(f"Step {i + 1}: Click successful. Waiting {action_wait}s...")
+                    time.sleep(action_wait)
+                finally:
+                    if iframe_title:
+                        # Always switch back to the main document
+                        driver.switch_to.default_content()
+                        target_logger.info(f"Step {i + 1}: Switched back to default content.")
             except Exception as e:
                 target_logger.error(f"Step {i + 1}: Click failed: {e}")
+                # Ensure we are back on the main document even after an error
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+                if continue_on_failure:
+                    target_logger.warning(f"Step {i + 1}: Continuing despite click failure (continue_on_failure=true).")
+                    continue
                 return extracted_values
 
         elif action_type == "fill":
@@ -225,6 +355,9 @@ def execute_actions(driver, target_logger, actions, action_wait):
                 time.sleep(action_wait)
             except Exception as e:
                 target_logger.error(f"Step {i + 1}: Fill failed: {e}")
+                if continue_on_failure:
+                    target_logger.warning(f"Step {i + 1}: Continuing despite fill failure (continue_on_failure=true).")
+                    continue
                 return extracted_values
 
         elif action_type == "get":
@@ -265,6 +398,8 @@ def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
     try:
         target_logger.info(f"Initiating extraction from {url}")
         driver.get(url)
+        target_logger.info("Page opened, performing initial random mouse movement...")
+        random_mouse_movements(driver, duration=4)
 
         # Scroll the page progressively to trigger lazy loading
         try:
