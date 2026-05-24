@@ -10,10 +10,12 @@ from selenium.webdriver.common.by import By
 from lxml import html
 import sys
 import requests
+import re
+import boto3
 
 # --- Configuration ---
-CONFIG_FILE = "config.json"
-LOG_FILE = "scraper_run.log"
+CONFIG_FILE = os.environ.get("CONFIG_FILE", "config.json")
+LOG_FILE = os.environ.get("LOG_FILE", "scraper_run.log")
 
 # Configure logging
 def setup_logging():
@@ -67,7 +69,7 @@ def load_config():
     return None
 
 
-def create_driver(chrome_driver_path=None, headless=True):
+def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=False):
     """Create a Chrome WebDriver instance, with specific settings for AWS Lambda if detected."""
     is_lambda = os.environ.get("AWS_LAMBDA_FUNCTION_NAME") is not None
     chrome_options = Options()
@@ -95,6 +97,10 @@ def create_driver(chrome_driver_path=None, headless=True):
     # Local environment
     if headless:
         chrome_options.add_argument("--headless")
+    
+    if keep_browser_open and not is_lambda:
+        chrome_options.add_experimental_option("detach", True)
+
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -112,6 +118,49 @@ def create_driver(chrome_driver_path=None, headless=True):
 
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+def get_secret(secret_name, key):
+    region_name = os.environ.get('region')
+    if region_name:
+        client = boto3.client('secretsmanager', region_name=region_name)
+    else:
+        client = boto3.client('secretsmanager')
+    try:
+        response = client.get_secret_value(SecretId=secret_name)
+    except Exception as e:
+        raise e
+
+    if 'SecretString' in response:
+        secret = response['SecretString']
+        try:
+            secret_dict = json.loads(secret)
+            return secret_dict.get(key)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+def resolve_value(value_str, error_logger=logger):
+    if not isinstance(value_str, str):
+        return value_str
+    
+    secret_match = re.match(r"secret_manager\['([^']+)'\]\['([^']+)'\]", value_str)
+    string_match = re.match(r"string\['([^']+)'\]", value_str)
+    
+    if secret_match:
+        secret_name = secret_match.group(1)
+        secret_key = secret_match.group(2)
+        try:
+            secret_value = get_secret(secret_name, secret_key)
+            if secret_value is None:
+                error_logger.error(f"Secret key '{secret_key}' not found in '{secret_name}'")
+            return secret_value
+        except Exception as e:
+            error_logger.error(f"Failed to get secret '{secret_name}': {e}")
+            return None
+    elif string_match:
+        return string_match.group(1)
+        
+    return value_str
 
 def execute_actions(driver, target_logger, actions, action_wait):
     """Execute a list of actions sequentially. Returns a list of extracted values from 'get' actions."""
@@ -147,6 +196,32 @@ def execute_actions(driver, target_logger, actions, action_wait):
                 time.sleep(action_wait)
             except Exception as e:
                 target_logger.error(f"Step {i + 1}: Click failed: {e}")
+                return extracted_values
+
+        elif action_type == "fill":
+            target_logger.info(f"Step {i + 1}: Filling element...")
+            value_from = action.get("value_from")
+            if not value_from:
+                target_logger.error(f"Step {i + 1}: Missing 'value_from' for fill action.")
+                continue
+            
+            secret_value = resolve_value(value_from, target_logger)
+            if secret_value is None:
+                target_logger.error(f"Step {i + 1}: Failed to resolve 'value_from': {value_from}")
+                continue
+
+            try:
+                wait = WebDriverWait(driver, 15)
+                element = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                time.sleep(1)
+                
+                element.clear()
+                element.send_keys(secret_value)
+                target_logger.info(f"Step {i + 1}: Fill successful. Waiting {action_wait}s...")
+                time.sleep(action_wait)
+            except Exception as e:
+                target_logger.error(f"Step {i + 1}: Fill failed: {e}")
                 return extracted_values
 
         elif action_type == "get":
@@ -201,8 +276,7 @@ def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
 
         # Validate that there is at least one 'get' action
         if not actions or not any(a.get("type") == "get" for a in actions):
-            target_logger.error("Invalid actions: Must contain at least one action of type 'get'.")
-            return []
+            target_logger.warning("Invalid actions: Must contain at least one action of type 'get'.")
 
         results = execute_actions(driver, target_logger, actions, action_wait)
         
@@ -260,13 +334,17 @@ def main():
         config = load_config()
 
         if not config:
-            logger.error(f"Configuration not found. Please set CONFIG_JSON env var or create {CONFIG_FILE}.")
+            logger.error(f"Configuration not found. Please set CONFIG_JSON env var or create <name>.json and pass to `CONFIG_FILE=<name>.json python3 main.py`")
             return
+
+        if config.get("region"):
+            os.environ["region"] = config.get("region")
 
         chrome_driver_path = config.get("chrome_driver_path")
         headless = config.get("headless", True)
         wait_timeout = config.get("wait_timeout", 15)
         action_wait = config.get("action_wait", 2)
+        keep_browser_open = config.get("keep_browser_open", False)
         targets = config.get("targets", [])
 
         if not isinstance(targets, list) or len(targets) == 0:
@@ -275,7 +353,7 @@ def main():
 
         logger.info(f"Starting scraping process for {len(targets)} targets.")
 
-        driver = create_driver(chrome_driver_path, headless)
+        driver = create_driver(chrome_driver_path, headless, keep_browser_open)
         all_results = []
         try:
             for target in targets:
@@ -290,13 +368,16 @@ def main():
                 else:
                     logger.warning(f"Skipping target '{name}': Missing URL or actions.")
         finally:
-            driver.quit()
-            logger.info("Browser closed.")
+            if not keep_browser_open:
+                driver.quit()
+                logger.info("Browser closed.")
+            else:
+                logger.info("Browser kept open as per configuration.")
 
         logger.info("All scraping tasks processed.")
         
-        telegram_bot_token = config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN")
-        telegram_chat_id = config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID")
+        telegram_bot_token = resolve_value(config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN"))
+        telegram_chat_id = resolve_value(config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID"))
         if telegram_bot_token and telegram_chat_id and all_results:
             send_telegram_message(telegram_bot_token, telegram_chat_id, all_results)
 
