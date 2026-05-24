@@ -265,6 +265,30 @@ def execute_actions(driver, target_logger, actions, action_wait):
             continue
 
         # Actions that do not require an xpath element
+        if action_type == "switch_path":
+            path = action.get("path", "")
+            try:
+                from urllib.parse import urlparse
+                current_url = driver.current_url
+                parsed = urlparse(current_url)
+                # Rebuild origin: scheme://netloc  (includes port if non-standard)
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+                # Ensure path starts with /
+                if path and not path.startswith("/"):
+                    path = "/" + path
+                destination = origin + path
+                target_logger.info(f"Step {i + 1}: Switching path to '{destination}'...")
+                driver.get(destination)
+                target_logger.info(f"Step {i + 1}: Navigated to '{destination}'. Waiting {action_wait}s...")
+                time.sleep(action_wait)
+            except Exception as e:
+                target_logger.error(f"Step {i + 1}: switch_path failed: {e}")
+                if continue_on_failure:
+                    target_logger.warning(f"Step {i + 1}: Continuing despite switch_path failure (continue_on_failure=true).")
+                    continue
+                return extracted_values
+            continue
+
         if action_type == "sleep":
             raw_duration = action.get("duration", 0)
             try:
