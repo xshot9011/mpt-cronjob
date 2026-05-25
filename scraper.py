@@ -92,7 +92,7 @@ def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=Fals
         chrome_options.add_argument("--verbose")
         chrome_options.add_argument("--log-path=/tmp")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
+        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.22 Safari/537.36")
 
         driver_path = "/opt/bin/chromedriver"
         service = Service(executable_path=driver_path)
@@ -110,7 +110,7 @@ def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=Fals
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.22 Safari/537.36")
 
     if chrome_driver_path:
         service = Service(executable_path=chrome_driver_path)
@@ -251,6 +251,9 @@ def resolve_value(value_str, error_logger=logger):
         
     return value_str
 
+# ---------------------------------------------------------------------------- #
+#                          TODO: Simplify action order                         #
+# ---------------------------------------------------------------------------- #
 def execute_actions(driver, target_logger, actions, action_wait):
     """Execute a list of actions sequentially. Returns a list of extracted values from 'get' actions."""
     extracted_values = []
@@ -281,6 +284,7 @@ def execute_actions(driver, target_logger, actions, action_wait):
                 driver.get(destination)
                 target_logger.info(f"Step {i + 1}: Navigated to '{destination}'. Waiting {action_wait}s...")
                 time.sleep(action_wait)
+                random_mouse_movements(driver, 2)
             except Exception as e:
                 target_logger.error(f"Step {i + 1}: switch_path failed: {e}")
                 if continue_on_failure:
@@ -301,14 +305,32 @@ def execute_actions(driver, target_logger, actions, action_wait):
             target_logger.info(f"Step {i + 1}: Sleep complete.")
             continue
 
-        # Script-based 'get' actions do not require an xpath
-        is_script_get = action_type == "get" and action.get("script")
-        if not xpath and not is_script_get:
+        is_missing_x_path = False
+        is_contain_script = action.get("script") is not None
+        is_contain_xpath = action.get("xpath") is not None
+        if action_type == "click" and not(is_contain_script or is_contain_xpath):
+            is_missing_x_path = True
+        if action_type == "get" and not(is_contain_script or is_contain_xpath):
+            is_missing_x_path = True
+        if is_missing_x_path:
             target_logger.error(f"Action {i + 1}: Missing 'xpath' for action type '{action_type}'. Skipping.")
             continue
 
         if action_type == "click":
             iframe_title = action.get("iframe_title")
+            script = action.get("script")
+            # --- Script-based extraction ---
+            if script:
+                target_logger.info(f"Step {i + 1}: Clicking element with script.. `{script}`")
+                try:
+                    driver.execute_script(script)
+                    random_mouse_movements(driver, 3)
+                    continue
+                except Exception as e:
+                    if continue_on_failure:
+                        target_logger.warning(f"Step {i + 1}: Continuing despite click failure (continue_on_failure=true).")
+                        continue
+
             target_logger.info(f"Step {i + 1}: Clicking element{'  (inside iframe: ' + iframe_title + ')' if iframe_title else ''}...")
             try:
                 if iframe_title:
@@ -334,6 +356,7 @@ def execute_actions(driver, target_logger, actions, action_wait):
                     # Attempt standard click, fallback to javascript click
                     try:
                         element.click()
+                        random_mouse_movements(driver, 2)
                     except Exception:
                         target_logger.warning(f"Step {i + 1}: Standard click failed, using Javascript fallback.")
                         driver.execute_script("arguments[0].click();", element)
@@ -378,6 +401,7 @@ def execute_actions(driver, target_logger, actions, action_wait):
                 element.clear()
                 element.send_keys(secret_value)
                 target_logger.info(f"Step {i + 1}: Fill successful. Waiting {action_wait}s...")
+                random_mouse_movements(driver, 2)
                 time.sleep(action_wait)
             except Exception as e:
                 target_logger.error(f"Step {i + 1}: Fill failed: {e}")
@@ -448,7 +472,7 @@ def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
         target_logger.info(f"Initiating extraction from {url}")
         driver.get(url)
         target_logger.info("Page opened, performing initial random mouse movement...")
-        random_mouse_movements(driver, duration=4)
+        random_mouse_movements(driver, duration=2)
 
         # Scroll the page progressively to trigger lazy loading
         try:
