@@ -2,8 +2,8 @@ FROM public.ecr.aws/lambda/python:3.13 AS build
 
 # Fetch the exact linux64 Chromium binaries via multi-stage
 RUN dnf install -y unzip && \
-    curl -Lo "/tmp/chromedriver-linux64.zip" "https://storage.googleapis.com/chrome-for-testing-public/147.0.7727.24/linux64/chromedriver-linux64.zip" && \
-    curl -Lo "/tmp/chrome-headless-shell-linux64.zip" "https://storage.googleapis.com/chrome-for-testing-public/147.0.7727.24/linux64/chrome-headless-shell-linux64.zip" && \
+    curl -Lo "/tmp/chromedriver-linux64.zip" "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.22/linux64/chromedriver-linux64.zip" && \
+    curl -Lo "/tmp/chrome-headless-shell-linux64.zip" "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.22/linux64/chrome-headless-shell-linux64.zip" && \
     unzip -q /tmp/chromedriver-linux64.zip -d /opt/ && \
     unzip -q /tmp/chrome-headless-shell-linux64.zip -d /opt/
 
