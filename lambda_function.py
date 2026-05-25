@@ -36,6 +36,11 @@ def lambda_handler(event, context):
         logger.info(f"Starting Lambda scraping for {len(targets)} targets.")
         
         driver = create_driver(chrome_driver_path, headless)
+        driver.execute_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            })
+        """)
         all_results = []
         
         try:
