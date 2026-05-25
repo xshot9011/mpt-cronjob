@@ -77,6 +77,7 @@ def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=Fals
     chrome_options = Options()
 
     if is_lambda:
+        logger.info("Create driver with lambda env")
         # Standard Lambda Chrome options
         chrome_options.binary_location = "/opt/bin/headless-chromium/chrome-headless-shell"
         chrome_options.add_argument("--headless=new")
@@ -93,6 +94,7 @@ def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=Fals
         chrome_options.add_argument("--log-path=/tmp")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.22 Safari/537.36")
+        chrome_options.add_argument("--window-size=1920,1080")
 
         driver_path = "/opt/bin/chromedriver"
         service = Service(executable_path=driver_path)
@@ -100,7 +102,7 @@ def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=Fals
     
     # Local environment
     if headless:
-        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--headless=new")
     
     if keep_browser_open and not is_lambda:
         chrome_options.add_experimental_option("detach", True)
