@@ -321,19 +321,8 @@ def execute_actions(driver, target_logger, actions, action_wait):
         if action_type == "click":
             iframe_title = action.get("iframe_title")
             script = action.get("script")
-            # --- Script-based extraction ---
-            if script:
-                target_logger.info(f"Step {i + 1}: Clicking element with script.. `{script}`")
-                try:
-                    driver.execute_script(script)
-                    random_mouse_movements(driver, 3)
-                    continue
-                except Exception as e:
-                    if continue_on_failure:
-                        target_logger.warning(f"Step {i + 1}: Continuing despite click failure (continue_on_failure=true).")
-                        continue
 
-            target_logger.info(f"Step {i + 1}: Clicking element{'  (inside iframe: ' + iframe_title + ')' if iframe_title else ''}...")
+            target_logger.info(f"Step {i + 1}: Clicking element{' (inside iframe: ' + iframe_title + ')' if iframe_title else ''}...")
             try:
                 if iframe_title:
                     # Switch into the iframe identified by its title attribute
@@ -347,24 +336,29 @@ def execute_actions(driver, target_logger, actions, action_wait):
                     target_logger.info(f"Step {i + 1}: Switched into iframe '{iframe_title}'.")
 
                 try:
-                    # Wait for element to be present in DOM (inside iframe if applicable)
-                    wait = WebDriverWait(driver, 15)
-                    element = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+                    if script:
+                        target_logger.info(f"Step {i + 1}: Executing click script: `{script}`")
+                        driver.execute_script(script)
+                        random_mouse_movements(driver, 3)
+                    else:
+                        # Wait for element to be present in DOM (inside iframe if applicable)
+                        wait = WebDriverWait(driver, 15)
+                        element = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
 
-                    # Scroll element into the center of the viewport
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-                    time.sleep(1)  # Wait for scrolling to finish
+                        # Scroll element into the center of the viewport
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                        time.sleep(1)  # Wait for scrolling to finish
 
-                    # Attempt standard click, fallback to javascript click
-                    try:
-                        element.click()
-                        random_mouse_movements(driver, 2)
-                    except Exception:
-                        target_logger.warning(f"Step {i + 1}: Standard click failed, using Javascript fallback.")
-                        driver.execute_script("arguments[0].click();", element)
+                        # Attempt standard click, fallback to javascript click
+                        try:
+                            element.click()
+                            random_mouse_movements(driver, 2)
+                        except Exception:
+                            target_logger.warning(f"Step {i + 1}: Standard click failed, using Javascript fallback.")
+                            driver.execute_script("arguments[0].click();", element)
 
-                    target_logger.info(f"Step {i + 1}: Click successful. Waiting {action_wait}s...")
-                    time.sleep(action_wait)
+                        target_logger.info(f"Step {i + 1}: Click successful. Waiting {action_wait}s...")
+                        time.sleep(action_wait)
                 finally:
                     if iframe_title:
                         # Always switch back to the main document
