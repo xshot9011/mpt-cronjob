@@ -5,7 +5,8 @@ RUN dnf install -y unzip && \
     curl -Lo "/tmp/chromedriver-linux64.zip" "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.22/linux64/chromedriver-linux64.zip" && \
     curl -Lo "/tmp/chrome-headless-shell-linux64.zip" "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.22/linux64/chrome-headless-shell-linux64.zip" && \
     unzip -q /tmp/chromedriver-linux64.zip -d /opt/ && \
-    unzip -q /tmp/chrome-headless-shell-linux64.zip -d /opt/
+    unzip -q /tmp/chrome-headless-shell-linux64.zip -d /opt/ && \
+    dnf clean all
 
 FROM public.ecr.aws/lambda/python:3.13
 
@@ -13,7 +14,8 @@ FROM public.ecr.aws/lambda/python:3.13
 RUN dnf install -y atk cups-libs gtk3 libXcomposite alsa-lib \
     libXcursor libXdamage libXext libXi libXrandr libXScrnSaver \
     libXtst pango at-spi2-atk libXt xorg-x11-server-Xvfb \
-    xorg-x11-xauth dbus-glib dbus-glib-devel nss mesa-libgbm jq unzip
+    xorg-x11-xauth dbus-glib dbus-glib-devel nss mesa-libgbm jq unzip && \
+    dnf clean all
 
 # Copy from build stage and place them exactly where your scraper.py expects them:
 # /opt/bin/headless-chromium/chrome-headless-shell and /opt/bin/chromedriver
