@@ -1,24 +1,35 @@
 # mpt-cronjob
 
-A Selenium-based web scraper built for both local environments (macOS/Linux) and cloud deployment (AWS Lambda as a container). 
+A Playwright-based web scraper built for both local environments (macOS/Linux) and cloud deployment (AWS Lambda as a container). 
 
 ## 🚀 Overview
 
-- **Engine**: Selenium with Chrome Headless Shell.
+- **Engine**: Official [Playwright](https://playwright.dev/python/) (Microsoft) driving Chromium.
 - **Support**: 
   - **Local**: Scheduled via macOS `launchd` or ran manually.
   - **Cloud**: Packaged as a Docker container for AWS Lambda.
 - **Dynamic Config**: Loads targets and actions from environment variables or a JSON file.
+
+> **Note on Cloudflare:** running headless from an AWS/Lambda datacenter IP is the
+> weakest position against Cloudflare's managed challenges. The scraper applies
+> best-effort stealth (init-script `navigator.webdriver` patches,
+> `--disable-blink-features=AutomationControlled`, realistic UA/locale/timezone,
+> human-like mouse movement) and supports an optional residential `proxy` and a
+> persisted `storage_state` session (see Configuration). If challenges still
+> block you, a residential proxy or moving off Lambda are the next levers.
 
 ---
 
 ## 🛠 Prerequisites
 
 ### For Local Usage:
-- **Google Chrome** installed.
-- **ChromeDriver** binary placed in the project root or accessible via system path.
-  - Download from: [Chrome for Testing dashboard](https://googlechromelabs.github.io/chrome-for-testing/).
 - **Python 3.9+**
+- Playwright + its Chromium browser (installed via the steps below — no separate
+  Chrome/ChromeDriver download needed):
+  ```bash
+  pip3 install -r requirements.txt
+  python3 -m playwright install chromium
+  ```
 
 ### For AWS Lambda (Container):
 - **Docker** installed and running.
@@ -38,6 +49,7 @@ A Selenium-based web scraper built for both local environments (macOS/Linux) and
   ```bash
   source venv/bin/activate
   pip3 install -r requirements.txt
+  python3 -m playwright install chromium
   ```
 
 3. **Configure Targets**:
@@ -104,6 +116,18 @@ For certain configuration fields (e.g., the `fill` action's `value_from`, `teleg
 - **Raw Strings**: `string['<value>']`
   *Example*: `"string['my_hardcoded_value']"` will be parsed directly as `"my_hardcoded_value"`.
 - **Plain Values**: Any value not matching the above syntax will be evaluated exactly as provided.
+
+### Optional Anti-Bot / Session Keys
+These top-level config keys are optional and default to sensible values:
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `user_agent` | recent desktop Chrome UA | Override the browser User-Agent string. |
+| `locale` | `en-US` | Browser locale. |
+| `timezone_id` | `Asia/Bangkok` | Emulated timezone (match it to your proxy region). |
+| `viewport` | `{ "width": 1920, "height": 1080 }` | Browser viewport size. |
+| `storage_state` | _(unset)_ | Path to a JSON file. Cookies/session are restored from it at start and saved back on exit — lets you reuse a login across runs instead of a cold login each time. |
+| `proxy` | _(unset)_ | Residential proxy, e.g. `{ "server": "http://host:port", "username": "secret_manager['x']['PROXY_USER']", "password": "secret_manager['x']['PROXY_PASS']" }`. `username`/`password` support the same dynamic resolution as `value_from`. Routing through a residential IP is the biggest lever against Cloudflare when running from Lambda. |
 
 ---
 

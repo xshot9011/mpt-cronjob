@@ -2,29 +2,48 @@ import os
 import json
 import logging
 import time
-
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from lxml import html
 import sys
-import requests
 import re
-import boto3
 import random
-from selenium.webdriver import ActionChains
+import html as html_escape
+
+import requests
+import boto3
+from playwright.sync_api import (
+    sync_playwright,
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 # --- Configuration ---
 CONFIG_FILE = os.environ.get("CONFIG_FILE", "config.json")
 LOG_FILE = os.environ.get("LOG_FILE", "scraper_run.log")
+
+# A realistic, recent desktop Chrome UA. Override via config "user_agent".
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+)
+DEFAULT_VIEWPORT = {"width": 1920, "height": 1080}
+
+# Init script injected into every page/frame before any site code runs.
+# Stock Playwright leaks navigator.webdriver=true and an empty window.chrome;
+# these patches smooth over the most obvious automation tells. (This is best
+# effort only -- a datacenter/Lambda IP remains the dominant Cloudflare signal.)
+STEALTH_INIT_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+window.chrome = window.chrome || { runtime: {} };
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+"""
+
 
 # Configure logging
 def setup_logging():
     is_lambda = os.environ.get("AWS_LAMBDA_FUNCTION_NAME") is not None
     log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
-    
+
     # Define format: exclude timestamp for Lambda as it provides its own
     if is_lambda:
         log_format = '[%(levelname)s] [%(name)s] %(message)s'
@@ -32,13 +51,13 @@ def setup_logging():
         # This handles cases where root.handlers might be empty at import time.
         logging.basicConfig(level=log_level, format=log_format, force=True)
         return logging.getLogger("Scraper")
-        
+
     log_format = '[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s'
     handlers = [
         logging.StreamHandler(sys.stdout),
         logging.FileHandler(LOG_FILE)
     ]
-        
+
     logging.basicConfig(
         level=log_level,
         format=log_format,
@@ -46,6 +65,7 @@ def setup_logging():
         handlers=handlers
     )
     return logging.getLogger("Scraper")
+
 
 logger = setup_logging()
 
@@ -70,122 +90,6 @@ def load_config():
 
     return None
 
-
-def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=False):
-    """Create a Chrome WebDriver instance, with specific settings for AWS Lambda if detected."""
-    is_lambda = os.environ.get("AWS_LAMBDA_FUNCTION_NAME") is not None
-    chrome_options = Options()
-
-    if is_lambda:
-        logger.info("Create driver with lambda env")
-        # Standard Lambda Chrome options
-        chrome_options.binary_location = "/opt/bin/headless-chromium/chrome-headless-shell"
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-tools")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--no-zygote")
-        chrome_options.add_argument("--single-process")
-        chrome_options.add_argument("--data-path=/tmp/data-path")
-        chrome_options.add_argument("--disk-cache-dir=/tmp/cache-dir")
-        chrome_options.add_argument("--remote-debugging-pipe")
-        chrome_options.add_argument("--verbose")
-        chrome_options.add_argument("--log-path=/tmp")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.22 Safari/537.36")
-        chrome_options.add_argument("--window-size=1920,1080")
-
-        driver_path = "/opt/bin/chromedriver"
-        service = Service(executable_path=driver_path)
-        return webdriver.Chrome(service=service, options=chrome_options)
-    
-    # Local environment
-    if headless:
-        chrome_options.add_argument("--headless=new")
-    
-    if keep_browser_open and not is_lambda:
-        chrome_options.add_experimental_option("detach", True)
-
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.22 Safari/537.36")
-
-    if chrome_driver_path:
-        service = Service(executable_path=chrome_driver_path)
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-    else:
-        driver = webdriver.Chrome(options=chrome_options)
-
-    return driver
-
-def random_mouse_movements(driver, duration=5, interval=0.2):
-    """
-    Simulate random mouse movements over the page to mimic human interaction.
-    Parameters:
-        driver: Selenium WebDriver instance.
-        duration: Total time in seconds to perform movements.
-        interval: Time between movements in seconds.
-    """
-    try:
-        is_lambda = os.environ.get("AWS_LAMBDA_FUNCTION_NAME") is not None
-        if is_lambda:
-            # In Lambda the display is headless; use JavaScript to dispatch mousemove events
-            end_time = time.time() + duration
-            while time.time() < end_time:
-                # Random coordinates within the viewport
-                viewport = driver.get_window_size()
-                width = viewport.get('width', 1920)
-                height = viewport.get('height', 1080)
-                x = random.randint(0, max(width - 1, 0))
-                y = random.randint(0, max(height - 1, 0))
-                # Dispatch a mousemove event at (x, y)
-                script = """
-                var ev = new MouseEvent('mousemove', {
-                    view: window,
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: %d,
-                    clientY: %d
-                });
-                document.elementFromPoint(%d, %d).dispatchEvent(ev);
-                """ % (x, y, x, y)
-                try:
-                    driver.execute_script(script)
-                except Exception as js_err:
-                    logger.debug(f"JS mouse move error: {js_err}")
-                time.sleep(interval)
-            return
-        # Non-Lambda (local) environment – use ActionChains with body element
-        viewport = driver.get_window_size()
-        viewport_width = viewport.get('width', 1920)
-        viewport_height = viewport.get('height', 1080)
-        body = driver.find_element(By.TAG_NAME, 'body')
-        body_size = body.size
-        width = int(body_size.get('width', viewport_width))
-        height = int(body_size.get('height', viewport_height))
-        end_time = time.time() + duration
-        while time.time() < end_time:
-            x_offset = random.randint(0, max(width - 1, 0))
-            y_offset = random.randint(0, max(height - 1, 0))
-            try:
-                ActionChains(driver).move_to_element_with_offset(body, x_offset, y_offset).perform()
-            except Exception as move_err:
-                logger.debug(f"Random mouse move out of bounds ({x_offset},{y_offset}): {move_err}")
-                try:
-                    ActionChains(driver).move_to_element_with_offset(body, 0, 0).perform()
-                except Exception:
-                    pass
-            time.sleep(interval)
-    except Exception as e:
-        logger.warning(f"Random mouse movement encountered an error: {e}")
-
-
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 def get_secret(secret_name, key):
     region_name = os.environ.get('region')
@@ -233,10 +137,10 @@ def parse_duration(duration) -> float:
 def resolve_value(value_str, error_logger=logger):
     if not isinstance(value_str, str):
         return value_str
-    
+
     secret_match = re.match(r"secret_manager\['([^']+)'\]\['([^']+)'\]", value_str)
     string_match = re.match(r"string\['([^']+)'\]", value_str)
-    
+
     if secret_match:
         secret_name = secret_match.group(1)
         secret_key = secret_match.group(2)
@@ -250,13 +154,136 @@ def resolve_value(value_str, error_logger=logger):
             return None
     elif string_match:
         return string_match.group(1)
-        
+
     return value_str
+
+
+# ---------------------------------------------------------------------------- #
+#                            Browser / Playwright                              #
+# ---------------------------------------------------------------------------- #
+def _build_launch_args():
+    """Chromium launch flags. Lambda needs single-process/no-zygote to survive its
+    constrained process model; the rest reduce automation fingerprints."""
+    args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+        "--window-size=1920,1080",
+    ]
+    if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        args += [
+            "--single-process",
+            "--no-zygote",
+            "--disable-dev-tools",
+        ]
+    return args
+
+
+def _resolve_proxy(config, target_logger=logger):
+    """Optional residential proxy. Shape in config:
+        "proxy": {
+            "server": "http://host:port",
+            "username": "secret_manager['x']['PROXY_USER']",  # resolved
+            "password": "secret_manager['x']['PROXY_PASS']"
+        }
+    Routing through a residential IP is the single biggest lever against Cloudflare
+    when running from an AWS/Lambda datacenter range.
+    """
+    proxy_cfg = config.get("proxy")
+    if not proxy_cfg or not proxy_cfg.get("server"):
+        return None
+    proxy = {"server": proxy_cfg["server"]}
+    if proxy_cfg.get("username"):
+        proxy["username"] = resolve_value(proxy_cfg["username"], target_logger)
+    if proxy_cfg.get("password"):
+        proxy["password"] = resolve_value(proxy_cfg["password"], target_logger)
+    return proxy
+
+
+def launch_context(p, config):
+    """Launch Chromium and return (browser, context). The caller owns teardown."""
+    headless = config.get("headless", True)
+    user_agent = config.get("user_agent", DEFAULT_USER_AGENT)
+
+    launch_kwargs = {
+        "headless": headless,
+        "args": _build_launch_args(),
+    }
+    if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        # Lambda's task dir is read-only; Chromium needs a writable HOME for its
+        # profile/crashpad scratch space.
+        launch_kwargs["env"] = {**os.environ, "HOME": "/tmp"}
+
+    proxy = _resolve_proxy(config)
+    if proxy:
+        launch_kwargs["proxy"] = proxy
+        logger.info(f"Launching with proxy server {proxy.get('server')}")
+
+    browser = p.chromium.launch(**launch_kwargs)
+
+    context_kwargs = {
+        "user_agent": user_agent,
+        "viewport": config.get("viewport", DEFAULT_VIEWPORT),
+        "locale": config.get("locale", "en-US"),
+        "timezone_id": config.get("timezone_id", "Asia/Bangkok"),
+    }
+    # Reuse a saved login/session across runs so we are not doing a fresh
+    # (suspicious) cold login every time. Path is also written back on teardown.
+    storage_state = config.get("storage_state")
+    if storage_state and os.path.exists(storage_state):
+        logger.info(f"Restoring browser session from {storage_state}")
+        context_kwargs["storage_state"] = storage_state
+
+    context = browser.new_context(**context_kwargs)
+    context.add_init_script(STEALTH_INIT_SCRIPT)
+    context.set_default_timeout(15000)
+    return browser, context
+
+
+def humanize_mouse(page, duration=2.0, interval=0.2):
+    """Drift the mouse around to mimic human interaction. Best effort; never fatal."""
+    try:
+        vp = page.viewport_size or DEFAULT_VIEWPORT
+        width = max(vp.get("width", 1920) - 1, 1)
+        height = max(vp.get("height", 1080) - 1, 1)
+        end_time = time.time() + duration
+        while time.time() < end_time:
+            page.mouse.move(
+                random.randint(0, width),
+                random.randint(0, height),
+                steps=random.randint(2, 6),
+            )
+            time.sleep(interval)
+    except Exception as e:
+        logger.debug(f"humanize_mouse error: {e}")
+
+
+def _eval_script(scope, script):
+    """Run a user-supplied JS snippet against a Page or Frame, preserving Selenium's
+    execute_script semantics (snippets use `return ...` to produce a value)."""
+    return scope.evaluate(f"() => {{ {script} }}")
+
+
+def _enter_frame(page, iframe_title, target_logger, step):
+    """Return the Frame for an <iframe title="..."> so locators/scripts run inside it.
+    Returns the page itself when no iframe_title is given."""
+    if not iframe_title:
+        return page
+    handle = page.wait_for_selector(
+        f"iframe[title='{iframe_title}']", timeout=15000, state="attached"
+    )
+    frame = handle.content_frame()
+    if frame is None:
+        raise PlaywrightError(f"Could not enter iframe '{iframe_title}'")
+    target_logger.info(f"Step {step}: Entered iframe '{iframe_title}'.")
+    return frame
+
 
 # ---------------------------------------------------------------------------- #
 #                          TODO: Simplify action order                         #
 # ---------------------------------------------------------------------------- #
-def execute_actions(driver, target_logger, actions, action_wait):
+def execute_actions(page, target_logger, actions, action_wait):
     """Execute a list of actions sequentially. Returns a list of extracted values from 'get' actions."""
     extracted_values = []
 
@@ -274,7 +301,7 @@ def execute_actions(driver, target_logger, actions, action_wait):
             path = action.get("path", "")
             try:
                 from urllib.parse import urlparse
-                current_url = driver.current_url
+                current_url = page.url
                 parsed = urlparse(current_url)
                 # Rebuild origin: scheme://netloc  (includes port if non-standard)
                 origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -283,10 +310,10 @@ def execute_actions(driver, target_logger, actions, action_wait):
                     path = "/" + path
                 destination = origin + path
                 target_logger.info(f"Step {i + 1}: Switching path to '{destination}'...")
-                driver.get(destination)
+                page.goto(destination, wait_until="domcontentloaded")
                 target_logger.info(f"Step {i + 1}: Navigated to '{destination}'. Waiting {action_wait}s...")
                 time.sleep(action_wait)
-                random_mouse_movements(driver, 2)
+                humanize_mouse(page, 2)
             except Exception as e:
                 target_logger.error(f"Step {i + 1}: switch_path failed: {e}")
                 if continue_on_failure:
@@ -307,15 +334,10 @@ def execute_actions(driver, target_logger, actions, action_wait):
             target_logger.info(f"Step {i + 1}: Sleep complete.")
             continue
 
-        is_missing_x_path = False
         is_contain_script = action.get("script") is not None
         is_contain_xpath = action.get("xpath") is not None
-        if action_type == "click" and not(is_contain_script or is_contain_xpath):
-            is_missing_x_path = True
-        if action_type == "get" and not(is_contain_script or is_contain_xpath):
-            is_missing_x_path = True
-        if is_missing_x_path:
-            target_logger.error(f"Action {i + 1}: Missing 'xpath' for action type '{action_type}'. Skipping.")
+        if action_type in ("click", "get") and not (is_contain_script or is_contain_xpath):
+            target_logger.error(f"Action {i + 1}: Missing 'xpath' or 'script' for action type '{action_type}'. Skipping.")
             continue
 
         if action_type == "click":
@@ -324,53 +346,28 @@ def execute_actions(driver, target_logger, actions, action_wait):
 
             target_logger.info(f"Step {i + 1}: Clicking element{' (inside iframe: ' + iframe_title + ')' if iframe_title else ''}...")
             try:
-                if iframe_title:
-                    # Switch into the iframe identified by its title attribute
-                    wait = WebDriverWait(driver, 15)
-                    iframe_element = wait.until(
-                        EC.presence_of_element_located(
-                            (By.XPATH, f"//iframe[@title='{iframe_title}']")
-                        )
-                    )
-                    driver.switch_to.frame(iframe_element)
-                    target_logger.info(f"Step {i + 1}: Switched into iframe '{iframe_title}'.")
+                scope = _enter_frame(page, iframe_title, target_logger, i + 1)
 
-                try:
-                    if script:
-                        target_logger.info(f"Step {i + 1}: Executing click script: `{script}`")
-                        driver.execute_script(script)
-                        random_mouse_movements(driver, 3)
-                    else:
-                        # Wait for element to be present in DOM (inside iframe if applicable)
-                        wait = WebDriverWait(driver, 15)
-                        element = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+                if script:
+                    target_logger.info(f"Step {i + 1}: Executing click script: `{script}`")
+                    _eval_script(scope, script)
+                    humanize_mouse(page, 3)
+                else:
+                    locator = scope.locator(f"xpath={xpath}").first
+                    # Playwright auto-waits for the element to be actionable.
+                    locator.scroll_into_view_if_needed(timeout=15000)
+                    time.sleep(1)  # let any scroll-triggered content settle
+                    try:
+                        locator.click(timeout=15000)
+                        humanize_mouse(page, 2)
+                    except PlaywrightError:
+                        target_logger.warning(f"Step {i + 1}: Standard click failed, using Javascript fallback.")
+                        locator.evaluate("el => el.click()")
 
-                        # Scroll element into the center of the viewport
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-                        time.sleep(1)  # Wait for scrolling to finish
-
-                        # Attempt standard click, fallback to javascript click
-                        try:
-                            element.click()
-                            random_mouse_movements(driver, 2)
-                        except Exception:
-                            target_logger.warning(f"Step {i + 1}: Standard click failed, using Javascript fallback.")
-                            driver.execute_script("arguments[0].click();", element)
-
-                        target_logger.info(f"Step {i + 1}: Click successful. Waiting {action_wait}s...")
-                        time.sleep(action_wait)
-                finally:
-                    if iframe_title:
-                        # Always switch back to the main document
-                        driver.switch_to.default_content()
-                        target_logger.info(f"Step {i + 1}: Switched back to default content.")
+                    target_logger.info(f"Step {i + 1}: Click successful. Waiting {action_wait}s...")
+                    time.sleep(action_wait)
             except Exception as e:
                 target_logger.error(f"Step {i + 1}: Click failed: {e}")
-                # Ensure we are back on the main document even after an error
-                try:
-                    driver.switch_to.default_content()
-                except Exception:
-                    pass
                 if continue_on_failure:
                     target_logger.warning(f"Step {i + 1}: Continuing despite click failure (continue_on_failure=true).")
                     continue
@@ -378,26 +375,27 @@ def execute_actions(driver, target_logger, actions, action_wait):
 
         elif action_type == "fill":
             target_logger.info(f"Step {i + 1}: Filling element...")
+            iframe_title = action.get("iframe_title")
             value_from = action.get("value_from")
             if not value_from:
                 target_logger.error(f"Step {i + 1}: Missing 'value_from' for fill action.")
                 continue
-            
+
             secret_value = resolve_value(value_from, target_logger)
             if secret_value is None:
                 target_logger.error(f"Step {i + 1}: Failed to resolve 'value_from': {value_from}")
                 continue
 
             try:
-                wait = WebDriverWait(driver, 15)
-                element = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                scope = _enter_frame(page, iframe_title, target_logger, i + 1)
+                locator = scope.locator(f"xpath={xpath}").first
+                locator.scroll_into_view_if_needed(timeout=15000)
                 time.sleep(1)
-                
-                element.clear()
-                element.send_keys(secret_value)
+
+                # fill() clears the field then types the value.
+                locator.fill(str(secret_value))
                 target_logger.info(f"Step {i + 1}: Fill successful. Waiting {action_wait}s...")
-                random_mouse_movements(driver, 2)
+                humanize_mouse(page, 2)
                 time.sleep(action_wait)
             except Exception as e:
                 target_logger.error(f"Step {i + 1}: Fill failed: {e}")
@@ -408,12 +406,20 @@ def execute_actions(driver, target_logger, actions, action_wait):
 
         elif action_type == "get":
             target_logger.info(f"Step {i + 1}: Extracting value...")
+            iframe_title = action.get("iframe_title")
             script = action.get("script")
+
+            try:
+                scope = _enter_frame(page, iframe_title, target_logger, i + 1)
+            except Exception as e:
+                target_logger.error(f"Step {i + 1}: Could not enter iframe for get: {e}")
+                extracted_values.append(None)
+                continue
 
             if script:
                 # --- Script-based extraction ---
                 try:
-                    result_value = driver.execute_script(script)
+                    result_value = _eval_script(scope, script)
                     if result_value is None:
                         result_value = ""
                     result_value = str(result_value).strip()
@@ -431,18 +437,12 @@ def execute_actions(driver, target_logger, actions, action_wait):
                     extracted_values.append(None)
             else:
                 # --- XPath-based extraction ---
-                page_source = driver.page_source
-                tree = html.fromstring(page_source)
-                result = tree.xpath(xpath)
-
-                if result:
-                    first_match = result[0]
-                    if hasattr(first_match, 'text_content'):
-                        result_value = first_match.text_content().strip()
-                    elif hasattr(first_match, 'strip'):
-                        result_value = first_match.strip()
-                    else:
-                        result_value = str(first_match).strip()
+                # For attribute/text-node extraction use a `script` get instead;
+                # locators resolve to elements.
+                try:
+                    locator = scope.locator(f"xpath={xpath}").first
+                    text = locator.text_content(timeout=15000)
+                    result_value = (text or "").strip()
                     target_logger.debug(f"Step {i + 1}: Extracted '{result_value}'")
 
                     action_name = action.get("name")
@@ -452,7 +452,7 @@ def execute_actions(driver, target_logger, actions, action_wait):
                     if action_name:
                         item["name"] = action_name
                     extracted_values.append(item)
-                else:
+                except (PlaywrightError, PlaywrightTimeoutError):
                     target_logger.error(f"Step {i + 1}: No data found at XPath.")
                     extracted_values.append(None)
 
@@ -462,21 +462,21 @@ def execute_actions(driver, target_logger, actions, action_wait):
     return extracted_values
 
 
-def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
+def scrape_target(page, name, url, actions, wait_timeout, action_wait):
     target_logger = logging.getLogger(name)
     try:
         target_logger.info(f"Initiating extraction from {url}")
-        driver.get(url)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
         target_logger.info("Page opened, performing initial random mouse movement...")
-        random_mouse_movements(driver, duration=2)
+        humanize_mouse(page, duration=2)
 
         # Scroll the page progressively to trigger lazy loading
         try:
-            total_height = int(driver.execute_script("return document.body.scrollHeight"))
-            for i in range(1, total_height, 400):
-                driver.execute_script(f"window.scrollTo(0, {i});")
+            total_height = int(page.evaluate("() => document.body.scrollHeight"))
+            for y in range(1, total_height, 400):
+                page.evaluate(f"window.scrollTo(0, {y});")
                 time.sleep(0.1)
-            driver.execute_script("window.scrollTo(0, 0);") # Scroll back to top
+            page.evaluate("window.scrollTo(0, 0);")  # Scroll back to top
         except Exception as e:
             target_logger.warning(f"Scrolling to trigger lazy loads failed: {e}")
 
@@ -487,8 +487,8 @@ def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
         if not actions or not any(a.get("type") == "get" for a in actions):
             target_logger.warning("Invalid actions: Must contain at least one action of type 'get'.")
 
-        results = execute_actions(driver, target_logger, actions, action_wait)
-        
+        results = execute_actions(page, target_logger, actions, action_wait)
+
         successful_results = [r for r in results if r is not None]
 
         extracted_items = []
@@ -520,12 +520,57 @@ def scrape_target(driver, name, url, actions, wait_timeout, action_wait):
         target_logger.error(f"An unexpected error occurred: {e}")
         return []
 
-import html as html_escape
+
+def run_all(config):
+    """Open one browser session, run every target, and return the aggregated results.
+    Shared by both the local entrypoint (main) and the Lambda handler."""
+    targets = config.get("targets", [])
+    wait_timeout = config.get("wait_timeout", 15)
+    action_wait = config.get("action_wait", 2)
+    keep_browser_open = config.get("keep_browser_open", False)
+    storage_state = config.get("storage_state")
+
+    all_results = []
+    with sync_playwright() as p:
+        browser, context = launch_context(p, config)
+        page = context.new_page()
+        try:
+            for target in targets:
+                name = target.get("name", "UnnamedTarget")
+                url = target.get("url")
+                actions = target.get("actions", [])
+
+                if url and actions:
+                    target_results = scrape_target(page, name, url, actions, wait_timeout, action_wait)
+                    if target_results:
+                        all_results.extend(target_results)
+                else:
+                    logger.warning(f"Skipping target '{name}': Missing URL or actions.")
+        finally:
+            # Persist cookies/session so the next run can reuse the login.
+            if storage_state:
+                try:
+                    context.storage_state(path=storage_state)
+                    logger.info(f"Saved browser session to {storage_state}")
+                except Exception as e:
+                    logger.warning(f"Failed to save storage_state: {e}")
+            if not keep_browser_open:
+                context.close()
+                browser.close()
+                logger.info("Browser closed.")
+            else:
+                # Note: under `with sync_playwright()` the browser is still torn
+                # down when this function returns; keep_browser_open only skips
+                # the explicit close for local interactive debugging.
+                logger.info("Browser kept open as per configuration.")
+
+    return all_results
+
 
 def send_telegram_message(bot_token, chat_id, results):
     if not bot_token or not chat_id or not results:
         return
-    
+
     blocks = []
     for item in results:
         if len(item) == 3:
@@ -536,7 +581,7 @@ def send_telegram_message(bot_token, chat_id, results):
 
         safe_name = html_escape.escape(str(name))
         safe_value = html_escape.escape(str(value))
-        
+
         no_codeblock = False
         other_options = {}
         if isinstance(options, list):
@@ -545,15 +590,15 @@ def send_telegram_message(bot_token, chat_id, results):
                     no_codeblock = True
                 elif isinstance(opt, dict):
                     other_options.update(opt)
-                    
+
         if no_codeblock:
             blocks.append(f"{safe_name}\n{safe_value}")
         else:
             blocks.append(f"{safe_name}\n<pre>{safe_value}</pre>")
-    
+
     message = "\n".join(blocks)
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    
+
     try:
         response = requests.post(
             url,
@@ -572,53 +617,23 @@ def main():
         config = load_config()
 
         if not config:
-            logger.error(f"Configuration not found. Please set CONFIG_JSON env var or create <name>.json and pass to `CONFIG_FILE=<name>.json python3 main.py`")
+            logger.error(f"Configuration not found. Please set CONFIG_JSON env var or create <name>.json and pass to `CONFIG_FILE=<name>.json python3 scraper.py`")
             return
 
         if config.get("region"):
             os.environ["region"] = config.get("region")
 
-        chrome_driver_path = config.get("chrome_driver_path")
-        headless = config.get("headless", True)
-        wait_timeout = config.get("wait_timeout", 15)
-        action_wait = config.get("action_wait", 2)
-        keep_browser_open = config.get("keep_browser_open", False)
         targets = config.get("targets", [])
-
         if not isinstance(targets, list) or len(targets) == 0:
             logger.error("Invalid config: 'targets' must be a non-empty list.")
             return
 
         logger.info(f"Starting scraping process for {len(targets)} targets.")
 
-        driver = create_driver(chrome_driver_path, headless, keep_browser_open)
-        driver.execute_script("""
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            })
-        """)
-        all_results = []
-        try:
-            for target in targets:
-                name = target.get("name", "UnnamedTarget")
-                url = target.get("url")
-                actions = target.get("actions", [])
-
-                if url and actions:
-                    target_results = scrape_target(driver, name, url, actions, wait_timeout, action_wait)
-                    if target_results:
-                        all_results.extend(target_results)
-                else:
-                    logger.warning(f"Skipping target '{name}': Missing URL or actions.")
-        finally:
-            if not keep_browser_open:
-                driver.quit()
-                logger.info("Browser closed.")
-            else:
-                logger.info("Browser kept open as per configuration.")
+        all_results = run_all(config)
 
         logger.info("All scraping tasks processed.")
-        
+
         telegram_bot_token = resolve_value(config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN"))
         telegram_chat_id = resolve_value(config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID"))
         if telegram_bot_token and telegram_chat_id and all_results:

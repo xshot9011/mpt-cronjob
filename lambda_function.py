@@ -1,10 +1,11 @@
 import json
 import os
 import logging
-from scraper import create_driver, scrape_target, setup_logging, load_config, send_telegram_message, resolve_value
+from scraper import run_all, setup_logging, load_config, send_telegram_message, resolve_value
 
 # Reuse the logger configuration from scraper.py or set up new one
 logger = setup_logging()
+
 
 def lambda_handler(event, context):
     """
@@ -20,13 +21,14 @@ def lambda_handler(event, context):
                 "body": json.dumps({"error": "Configuration not found. Please set CONFIG_JSON env var or provide a config file."})
             }
 
-        # Allow event to override target list
-        targets = event.get("targets", config.get("targets", []))
-        chrome_driver_path = config.get("chrome_driver_path")
-        headless = config.get("headless", True)
-        wait_timeout = config.get("wait_timeout", 15)
-        action_wait = config.get("action_wait", 2)
+        if config.get("region"):
+            os.environ["region"] = config.get("region")
 
+        # Allow event to override the target list
+        if event and event.get("targets"):
+            config["targets"] = event["targets"]
+
+        targets = config.get("targets", [])
         if not targets:
             return {
                 "statusCode": 400,
@@ -34,30 +36,8 @@ def lambda_handler(event, context):
             }
 
         logger.info(f"Starting Lambda scraping for {len(targets)} targets.")
-        
-        driver = create_driver(chrome_driver_path, headless)
-        driver.execute_script("""
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            })
-        """)
-        all_results = []
-        
-        try:
-            for target in targets:
-                name = target.get("name", "UnnamedTarget")
-                url = target.get("url")
-                actions = target.get("actions", [])
 
-                if url and actions:
-                    # scrape_target logs results internally and now returns them
-                    target_results = scrape_target(driver, name, url, actions, wait_timeout, action_wait)
-                    if target_results:
-                        all_results.extend(target_results)
-                else:
-                    logger.warning(f"Skipping target '{name}': Missing URL or actions.")
-        finally:
-            driver.quit()
+        all_results = run_all(config)
 
         telegram_bot_token = resolve_value(config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN"), logger)
         telegram_chat_id = resolve_value(config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID"), logger)
@@ -66,7 +46,7 @@ def lambda_handler(event, context):
 
         return {
             "statusCode": 200,
-            "body": json.dumps({"message": "Scraping completed successfully."})
+            "body": json.dumps({"message": "Scraping completed successfully.", "results": len(all_results)})
         }
 
     except Exception as e:

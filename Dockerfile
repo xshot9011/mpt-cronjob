@@ -1,33 +1,26 @@
-FROM public.ecr.aws/lambda/python:3.13 AS build
-
-# Fetch the exact linux64 Chromium binaries via multi-stage
-RUN dnf install -y unzip && \
-    curl -Lo "/tmp/chromedriver-linux64.zip" "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.22/linux64/chromedriver-linux64.zip" && \
-    curl -Lo "/tmp/chrome-headless-shell-linux64.zip" "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.22/linux64/chrome-headless-shell-linux64.zip" && \
-    unzip -q /tmp/chromedriver-linux64.zip -d /opt/ && \
-    unzip -q /tmp/chrome-headless-shell-linux64.zip -d /opt/ && \
-    dnf clean all
-
 FROM public.ecr.aws/lambda/python:3.13
 
-# Install necessary AL2023 OS shared libraries for Chrome
-RUN dnf install -y atk cups-libs gtk3 libXcomposite alsa-lib \
-    libXcursor libXdamage libXext libXi libXrandr libXScrnSaver \
-    libXtst pango at-spi2-atk libXt xorg-x11-server-Xvfb \
-    xorg-x11-xauth dbus-glib dbus-glib-devel nss mesa-libgbm jq unzip && \
+# Install the AL2023 shared libraries Playwright's Chromium needs at runtime.
+RUN dnf install -y \
+    atk at-spi2-atk at-spi2-core cups-libs gtk3 pango cairo \
+    alsa-lib nss nspr mesa-libgbm libdrm libxkbcommon \
+    libXcomposite libXcursor libXdamage libXext libXfixes libXi \
+    libXrandr libXScrnSaver libXtst libXt \
+    xorg-x11-server-Xvfb xorg-x11-xauth dbus-glib dbus-glib-devel jq && \
     dnf clean all
 
-# Copy from build stage and place them exactly where your scraper.py expects them:
-# /opt/bin/headless-chromium/chrome-headless-shell and /opt/bin/chromedriver
-RUN mkdir -p /opt/bin/headless-chromium
-COPY --from=build /opt/chrome-headless-shell-linux64/ /opt/bin/headless-chromium/
-COPY --from=build /opt/chromedriver-linux64/chromedriver /opt/bin/chromedriver
+# Bake the Chromium build into the image at a fixed, read-only-safe location.
+# (Lambda's task dir is read-only at runtime, so the browser must live here and
+# HOME must point at the writable /tmp for Chromium's scratch/crashpad files.)
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV HOME=/tmp
 
-RUN chmod +x /opt/bin/headless-chromium/chrome-headless-shell /opt/bin/chromedriver
-
-# Intall python dependencies
+# Install python dependencies
 COPY requirements.txt ${LAMBDA_TASK_ROOT}
 RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Download the Chromium revision that matches the pinned Playwright version.
+RUN python -m playwright install chromium
 
 # Copy source code
 COPY scraper.py ${LAMBDA_TASK_ROOT}
