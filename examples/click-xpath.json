@@ -1,0 +1,24 @@
+{
+    "chrome_driver_path": null,
+    "headless": false,
+    "keep_browser_open": true,
+    "wait_timeout": 5,
+    "action_wait": 1,
+    "targets": [
+        {
+            "name": "Accept cookies and get page title",
+            "url": "file://<absolute_path_to_login.html>",
+            "actions": [
+                {
+                    "type": "click",
+                    "xpath": "//button[@id='loginBtn']"
+                },
+                {
+                    "type": "get",
+                    "name": "page_title",
+                    "xpath": "//h1"
+                }
+            ]
+        }
+    ]
+}

@@ -3,7 +3,9 @@
 # Exit on any error
 set -e
 
-IMAGE_NAME="mpt-staging-web-scraper"
+# IMAGE_NAME= run with IMAGE_NAME=xxxxxxx sh ./build_image.sh
+## Because I run out of token to accept from argument even it's easy m still lazy la
+
 IMAGE_TAG="latest"
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "YOUR_AWS_ACCOUNT_ID")
 AWS_REGION="ap-southeast-7"
