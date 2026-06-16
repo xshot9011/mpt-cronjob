@@ -250,8 +250,189 @@ def resolve_value(value_str, error_logger=logger):
             return None
     elif string_match:
         return string_match.group(1)
-        
+
     return value_str
+
+
+# ---------------------------------------------------------------------------- #
+#                      CapSolver CAPTCHA solving integration                   #
+# ---------------------------------------------------------------------------- #
+CAPSOLVER_API_BASE = os.environ.get("CAPSOLVER_API_BASE", "https://api.capsolver.com")
+
+# Maps the friendly `captcha_type` from config to:
+#   (CapSolver proxy-less task type, the field in `solution` holding the token)
+CAPSOLVER_TASK_MAP = {
+    "recaptcha_v2": ("ReCaptchaV2TaskProxyLess", "gRecaptchaResponse"),
+    "recaptcha_v3": ("ReCaptchaV3TaskProxyLess", "gRecaptchaResponse"),
+    "turnstile": ("AntiTurnstileTaskProxyLess", "token"),
+    "hcaptcha": ("HCaptchaTaskProxyLess", "gRecaptchaResponse"),
+}
+
+# JS snippets that try to read the site key from the DOM when it is not in config.
+_SITEKEY_DETECT_JS = {
+    "recaptcha_v2": """
+        var el = document.querySelector('.g-recaptcha[data-sitekey], [data-sitekey]');
+        if (el) { return el.getAttribute('data-sitekey'); }
+        var ifr = document.querySelector('iframe[src*="recaptcha"]');
+        if (ifr) { var m = ifr.src.match(/[?&]k=([^&]+)/); if (m) { return decodeURIComponent(m[1]); } }
+        return null;
+    """,
+    "hcaptcha": """
+        var el = document.querySelector('.h-captcha[data-sitekey], [data-sitekey]');
+        if (el) { return el.getAttribute('data-sitekey'); }
+        var ifr = document.querySelector('iframe[src*="hcaptcha"]');
+        if (ifr) { var m = ifr.src.match(/[?&]sitekey=([^&]+)/); if (m) { return decodeURIComponent(m[1]); } }
+        return null;
+    """,
+    "turnstile": """
+        var el = document.querySelector('.cf-turnstile[data-sitekey], [data-sitekey]');
+        if (el) { return el.getAttribute('data-sitekey'); }
+        return null;
+    """,
+}
+# reCAPTCHA v3 detects the same way as v2.
+_SITEKEY_DETECT_JS["recaptcha_v3"] = _SITEKEY_DETECT_JS["recaptcha_v2"]
+
+# JS that writes the solved token into the response field(s) the page expects,
+# creating the field if the widget never rendered it (common in headless).
+_INJECT_TOKEN_JS = """
+var token = arguments[0];
+var fieldNames = arguments[1];
+var tag = arguments[2]; // 'textarea' or 'input'
+fieldNames.forEach(function (name) {
+    var els = document.querySelectorAll(tag + '[name="' + name + '"], #' + name);
+    if (els.length === 0) {
+        var el = document.createElement(tag);
+        el.name = name;
+        el.id = name;
+        el.style.display = 'block';
+        document.body.appendChild(el);
+        els = [el];
+    }
+    els.forEach(function (el) {
+        el.value = token;
+        if (tag === 'textarea') { el.innerHTML = token; }
+    });
+});
+return true;
+"""
+
+# Best-effort firing of a reCAPTCHA callback so pages relying on it proceed.
+_INVOKE_RECAPTCHA_CALLBACK_JS = """
+var token = arguments[0];
+try {
+    var cfg = window.___grecaptcha_cfg;
+    if (!cfg || !cfg.clients) { return false; }
+    var fired = false;
+    Object.values(cfg.clients).forEach(function (client) {
+        Object.values(client).forEach(function (level1) {
+            if (level1 && typeof level1 === 'object') {
+                Object.values(level1).forEach(function (level2) {
+                    if (level2 && typeof level2 === 'object' && typeof level2.callback === 'function') {
+                        try { level2.callback(token); fired = true; } catch (e) {}
+                    }
+                });
+            }
+        });
+    });
+    return fired;
+} catch (e) { return false; }
+"""
+
+# Which response field names each CAPTCHA writes its token into.
+_TOKEN_FIELDS = {
+    "recaptcha_v2": (["g-recaptcha-response"], "textarea"),
+    "recaptcha_v3": (["g-recaptcha-response"], "textarea"),
+    "hcaptcha": (["h-captcha-response", "g-recaptcha-response"], "textarea"),
+    "turnstile": (["cf-turnstile-response"], "input"),
+}
+
+
+def solve_captcha_with_capsolver(api_key, captcha_type, website_url, website_key,
+                                 page_action, timeout, target_logger,
+                                 poll_interval=3.0):
+    """
+    Submit a CAPTCHA to CapSolver and poll until the token is ready.
+    Returns the solved token string, or raises on error/timeout.
+    """
+    task_type, solution_field = CAPSOLVER_TASK_MAP[captcha_type]
+
+    task = {
+        "type": task_type,
+        "websiteURL": website_url,
+        "websiteKey": website_key,
+    }
+    if captcha_type == "recaptcha_v3":
+        # pageAction must match the value the site uses; default to a common one.
+        task["pageAction"] = page_action or "verify"
+    elif captcha_type == "turnstile" and page_action:
+        # Turnstile carries the action (and optional cdata) under metadata.
+        task["metadata"] = {"action": page_action}
+
+    create_resp = requests.post(
+        f"{CAPSOLVER_API_BASE}/createTask",
+        json={"clientKey": api_key, "task": task},
+        timeout=30,
+    )
+    create_resp.raise_for_status()
+    create_data = create_resp.json()
+    if create_data.get("errorId"):
+        raise RuntimeError(
+            f"CapSolver createTask failed: {create_data.get('errorCode')} - "
+            f"{create_data.get('errorDescription')}"
+        )
+
+    task_id = create_data.get("taskId")
+    if not task_id:
+        raise RuntimeError("CapSolver createTask returned no taskId.")
+
+    target_logger.info(f"CapSolver task created ({task_id}); polling for result...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        result_resp = requests.post(
+            f"{CAPSOLVER_API_BASE}/getTaskResult",
+            json={"clientKey": api_key, "taskId": task_id},
+            timeout=30,
+        )
+        result_resp.raise_for_status()
+        result_data = result_resp.json()
+        if result_data.get("errorId"):
+            raise RuntimeError(
+                f"CapSolver getTaskResult failed: {result_data.get('errorCode')} - "
+                f"{result_data.get('errorDescription')}"
+            )
+
+        status = result_data.get("status")
+        if status == "ready":
+            token = (result_data.get("solution") or {}).get(solution_field)
+            if not token:
+                raise RuntimeError(
+                    f"CapSolver returned ready but no '{solution_field}' in solution."
+                )
+            return token
+        # status == "processing" (or "idle") -> keep polling
+        target_logger.debug(f"CapSolver task {task_id} status: {status}")
+
+    raise TimeoutError(f"CapSolver did not solve the CAPTCHA within {timeout}s.")
+
+
+def inject_captcha_token(driver, captcha_type, token, invoke_callback, target_logger):
+    """Write the solved token into the page and optionally fire the reCAPTCHA callback."""
+    field_names, tag = _TOKEN_FIELDS[captcha_type]
+    driver.execute_script(_INJECT_TOKEN_JS, token, field_names, tag)
+    target_logger.info(f"Injected CAPTCHA token into: {', '.join(field_names)}")
+
+    if invoke_callback and captcha_type in ("recaptcha_v2", "recaptcha_v3"):
+        try:
+            fired = driver.execute_script(_INVOKE_RECAPTCHA_CALLBACK_JS, token)
+            target_logger.info(
+                "reCAPTCHA callback fired." if fired
+                else "No reCAPTCHA callback found to fire."
+            )
+        except Exception as e:
+            target_logger.warning(f"reCAPTCHA callback invocation failed: {e}")
+
 
 # ---------------------------------------------------------------------------- #
 #                          TODO: Simplify action order                         #
@@ -305,6 +486,83 @@ def execute_actions(driver, target_logger, actions, action_wait):
             target_logger.info(f"Step {i + 1}: Sleeping for {seconds}s...")
             time.sleep(seconds)
             target_logger.info(f"Step {i + 1}: Sleep complete.")
+            continue
+
+        if action_type == "solve_captcha":
+            captcha_type = (action.get("captcha_type") or "recaptcha_v2").lower()
+            if captcha_type not in CAPSOLVER_TASK_MAP:
+                target_logger.error(
+                    f"Step {i + 1}: Unsupported captcha_type '{captcha_type}'. "
+                    f"Expected one of {list(CAPSOLVER_TASK_MAP)}."
+                )
+                if continue_on_failure:
+                    continue
+                return extracted_values
+
+            # API key: resolve via secret_manager[...]/string[...]/plain, else env var.
+            api_key_from = action.get("api_key_from")
+            api_key = (
+                resolve_value(api_key_from, target_logger) if api_key_from
+                else os.environ.get("CAPSOLVER_API_KEY")
+            )
+            if not api_key:
+                target_logger.error(
+                    f"Step {i + 1}: No CapSolver API key. Set 'api_key_from' or the "
+                    f"CAPSOLVER_API_KEY env var."
+                )
+                if continue_on_failure:
+                    continue
+                return extracted_values
+
+            website_url = action.get("website_url") or driver.current_url
+            website_key = action.get("website_key")
+            if not website_key:
+                try:
+                    website_key = driver.execute_script(_SITEKEY_DETECT_JS[captcha_type])
+                except Exception as e:
+                    target_logger.warning(f"Step {i + 1}: Site key auto-detection failed: {e}")
+                if website_key:
+                    target_logger.info(f"Step {i + 1}: Auto-detected site key: {website_key}")
+                else:
+                    target_logger.error(
+                        f"Step {i + 1}: Could not determine site key. Provide 'website_key'."
+                    )
+                    if continue_on_failure:
+                        continue
+                    return extracted_values
+
+            try:
+                timeout = parse_duration(action.get("timeout", 120))
+            except (ValueError, TypeError):
+                timeout = 120.0
+
+            target_logger.info(
+                f"Step {i + 1}: Solving {captcha_type} via CapSolver for {website_url}..."
+            )
+            try:
+                token = solve_captcha_with_capsolver(
+                    api_key=api_key,
+                    captcha_type=captcha_type,
+                    website_url=website_url,
+                    website_key=website_key,
+                    page_action=action.get("page_action"),
+                    timeout=timeout,
+                    target_logger=target_logger,
+                )
+                inject_captcha_token(
+                    driver, captcha_type, token,
+                    action.get("invoke_callback", False), target_logger,
+                )
+                target_logger.info(f"Step {i + 1}: CAPTCHA solved. Waiting {action_wait}s...")
+                time.sleep(action_wait)
+            except Exception as e:
+                target_logger.error(f"Step {i + 1}: CAPTCHA solving failed: {e}")
+                if continue_on_failure:
+                    target_logger.warning(
+                        f"Step {i + 1}: Continuing despite CAPTCHA failure (continue_on_failure=true)."
+                    )
+                    continue
+                return extracted_values
             continue
 
         is_missing_x_path = False
