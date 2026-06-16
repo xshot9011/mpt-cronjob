@@ -1,0 +1,69 @@
+{
+    "chrome_driver_path": null,
+    "headless": true,
+    "keep_browser_open": false,
+    "wait_timeout": 10,
+    "action_wait": 3,
+    "region": "ap-southeast-1",
+    "targets": [
+        {
+            "name": "Login behind a CAPTCHA, then extract balance",
+            "url": "https://example.com/login",
+            "actions": [
+                {
+                    "type": "fill",
+                    "xpath": "//input[@id='email']",
+                    "value_from": "secret_manager['my-app-secrets']['APP_USERNAME']"
+                },
+                {
+                    "type": "fill",
+                    "xpath": "//input[@id='password']",
+                    "value_from": "secret_manager['my-app-secrets']['APP_PASSWORD']"
+                },
+                {
+                    "type": "solve_captcha",
+                    "captcha_type": "recaptcha_v2",
+                    "api_key_from": "secret_manager['my-app-secrets']['CAPSOLVER_API_KEY']",
+                    "website_key": null,
+                    "invoke_callback": true,
+                    "timeout": "120s"
+                },
+                {
+                    "type": "click",
+                    "xpath": "//button[@type='submit']"
+                },
+                {
+                    "type": "sleep",
+                    "duration": "5s"
+                },
+                {
+                    "type": "switch_path",
+                    "path": "/dashboard"
+                },
+                {
+                    "type": "get",
+                    "name": "balance",
+                    "xpath": "//span[@class='balance-value']"
+                }
+            ]
+        },
+        {
+            "name": "Cloudflare Turnstile example (API key from plain string)",
+            "url": "https://example.com/protected",
+            "actions": [
+                {
+                    "type": "solve_captcha",
+                    "captcha_type": "turnstile",
+                    "api_key_from": "string['CAP-YOUR-CAPSOLVER-KEY']",
+                    "website_key": "0x4AAAAAAA...",
+                    "continue_on_failure": false
+                },
+                {
+                    "type": "get",
+                    "name": "status",
+                    "xpath": "//div[@id='status']"
+                }
+            ]
+        }
+    ]
+}
