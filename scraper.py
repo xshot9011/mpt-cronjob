@@ -80,6 +80,8 @@ def create_driver(chrome_driver_path=None, headless=True, keep_browser_open=Fals
         logger.info("Create driver with lambda env")
         # Standard Lambda Chrome options
         chrome_options.binary_location = "/opt/bin/headless-chromium/chrome-headless-shell"
+        chrome_options.add_argument("load-extension=/path/bin/capsolver-extension")
+        chrome_options.add_argument("--disable-features=DisableLoadExtensionCommandLineSwitch")
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-tools")
@@ -434,9 +436,6 @@ def inject_captcha_token(driver, captcha_type, token, invoke_callback, target_lo
             target_logger.warning(f"reCAPTCHA callback invocation failed: {e}")
 
 
-# ---------------------------------------------------------------------------- #
-#                          TODO: Simplify action order                         #
-# ---------------------------------------------------------------------------- #
 def execute_actions(driver, target_logger, actions, action_wait):
     """Execute a list of actions sequentially. Returns a list of extracted values from 'get' actions."""
     extracted_values = []
