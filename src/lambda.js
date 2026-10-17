@@ -1,10 +1,11 @@
 import { loadConfig } from "./config.js";
-import { apiKeyMatches, getHeader, isHttpEvent, parseJsonBody } from "./http.js";
+import { apiKeyMatches, getHeader, isHttpEvent, looksLikeHttpRequest, parseJsonBody } from "./http.js";
 import { getLogger } from "./logger.js";
 import { OutputError, selectOutputs, sendOutputs } from "./outputs.js";
 import { resolveValue } from "./resolve.js";
 import { runAll } from "./scraper.js";
 import { setSecretsRegion } from "./secrets.js";
+import { toBool } from "./util.js";
 
 const logger = getLogger("Scraper");
 
@@ -28,6 +29,10 @@ function reject(statusCode, error) {
  *
  *  - Trusted invocations (EventBridge schedule, console, CLI): the event may
  *    carry `targets` (replaces the configured ones), `only` and `outputs`.
+ *    `targets` is refused when config `http_api_key` is set, unless config
+ *    `allow_event_targets` is true: an HTTP-facing function shouldn't run
+ *    caller-supplied scripts if an integration ever delivers a request body
+ *    as a plain event (API Gateway non-proxy mappings do).
  *  - HTTP requests (API Gateway, Function URL): must send the `x-api-key`
  *    header matching config `http_api_key`; the JSON body may only carry
  *    `only` and `outputs`, so callers can pick configured targets and outputs
@@ -37,11 +42,16 @@ function reject(statusCode, error) {
  * `only` is a list of configured target names to run instead of all of them.
  * `outputs` is a list of configured output names to send the results to;
  * without it every configured output gets them, and [] sends nowhere.
+ * Request-style events that are neither shape above are refused.
  * Every refused invocation is logged before it returns.
  */
 export async function handler(event) {
     const http = isHttpEvent(event);
     try {
+        if (!http && looksLikeHttpRequest(event)) {
+            return reject(400, "Unsupported HTTP event: use an API Gateway proxy integration or a Lambda Function URL.");
+        }
+
         const config = loadConfig(logger);
         if (!config) {
             return reject(500, "Configuration not found. Please set CONFIG_JSON env var or provide a config file.");
@@ -69,6 +79,9 @@ export async function handler(event) {
             if (request.targets !== undefined) {
                 return reject(400, "'targets' is not accepted over HTTP; send 'only' with configured target names.");
             }
+        } else if (request.targets !== undefined && !toBool(config.allow_event_targets, !config.http_api_key)) {
+            return reject(400, "'targets' in the event is disabled for this function (http_api_key is set or "
+                + "allow_event_targets is false); send 'only' with configured target names.");
         } else if (Array.isArray(request.targets) && request.targets.length > 0) {
             config.targets = request.targets;
         }

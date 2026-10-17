@@ -3,7 +3,8 @@ import path from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { buildSwitchPathUrl } from "../src/actions.js";
-import { apiKeyMatches, isHttpEvent, parseJsonBody } from "../src/http.js";
+import { browserLaunchOptions } from "../src/browser.js";
+import { apiKeyMatches, isHttpEvent, looksLikeHttpRequest, parseJsonBody } from "../src/http.js";
 import { handler } from "../src/lambda.js";
 import { OutputError, SENDERS, configuredOutputs, selectOutputs, sendOutputs } from "../src/outputs.js";
 import { parseDuration, resolveValue } from "../src/resolve.js";
@@ -428,6 +429,8 @@ test("every refused invocation writes a log line", async (t) => {
         [API_CONFIG, httpEvent({ key: "test-key", body: "{oops" }), 400],
         [API_CONFIG, httpEvent({ key: "test-key", body: JSON.stringify({ targets: TARGETS }) }), 400],
         [API_CONFIG, httpEvent({ key: "wrong" }), 401],
+        [config, { body: JSON.stringify({ targets: TARGETS }) }, 400],
+        [API_CONFIG, { targets: TARGETS }, 400],
     ];
     for (const [cfg, event, expected] of cases) {
         lines.length = 0;
@@ -440,4 +443,63 @@ test("every refused invocation writes a log line", async (t) => {
     withEnv(t, { CONFIG_JSON: undefined, CONFIG_FILE: "does-not-exist.json" });
     assert.equal((await handler({})).statusCode, 500);
     assert.ok(lines.some((l) => l.includes("[ERROR]") && l.includes("Configuration not found")));
+});
+
+// ---- Hardening ----
+
+test("looksLikeHttpRequest flags request-style events only", () => {
+    assert.equal(looksLikeHttpRequest(httpEvent()), true);
+    assert.equal(looksLikeHttpRequest({ body: "{}" }), true);
+    assert.equal(looksLikeHttpRequest({ targets: [], only: ["Gold"], outputs: [] }), false);
+    assert.equal(looksLikeHttpRequest({ source: "aws.events", "detail-type": "Scheduled Event", detail: {} }), false);
+    assert.equal(looksLikeHttpRequest(undefined), false);
+    assert.equal(looksLikeHttpRequest(null), false);
+});
+
+test("request-style events that aren't a supported HTTP shape are refused", async (t) => {
+    const calls = stubFetch(t, () => new Response("{}"));
+    const config = JSON.stringify({ targets: TARGETS });
+    for (const event of [
+        // API Gateway WebSocket: requestContext without http/httpMethod, so no x-api-key check would run.
+        { requestContext: { routeKey: "$default", connectionId: "abc", eventType: "MESSAGE" }, body: "{}" },
+        // VPC Lattice
+        { method: "POST", raw_path: "/", headers: { "x-api-key": "k" }, body: "{}" },
+        { headers: {}, body: JSON.stringify({ targets: TARGETS }) },
+    ]) {
+        const { status, body } = await call(t, config, event);
+        assert.equal(status, 400);
+        assert.match(body.error, /^Unsupported HTTP event/);
+    }
+    assert.equal(calls.length, 0);
+});
+
+test("event 'targets' are refused on HTTP-facing functions unless allow_event_targets is set", async (t) => {
+    // What an API Gateway non-proxy mapping would hand over from a request body.
+    const event = { targets: [{ name: "evil", url: "https://attacker.test", actions: [{ type: "get", script: "return 1" }] }] };
+    const refused = await call(t, API_CONFIG, event);
+    assert.equal(refused.status, 400);
+    assert.match(refused.body.error, /^'targets' in the event is disabled for this function/);
+
+    const optedOut = JSON.stringify({ allow_event_targets: "false", targets: TARGETS });
+    assert.equal((await call(t, optedOut, event)).status, 400);
+
+    // Opting in lets the event through to the usual checks.
+    const optedIn = JSON.stringify({ http_api_key: "string['test-key']", allow_event_targets: true, targets: [] });
+    assert.deepEqual((await call(t, optedIn, { targets: [] })).body, { error: "No targets configured." });
+});
+
+test("browserLaunchOptions keeps the Chromium sandbox on locally and off on Lambda", (t) => {
+    withEnv(t, { AWS_LAMBDA_FUNCTION_NAME: undefined });
+    const local = browserLaunchOptions({ headless: "false" });
+    assert.equal(local.chromiumSandbox, true);
+    assert.equal(local.headless, false);
+    assert.ok(!local.args.includes("--no-sandbox"));
+    assert.equal(browserLaunchOptions({ chromium_sandbox: "false" }).chromiumSandbox, false);
+
+    withEnv(t, { AWS_LAMBDA_FUNCTION_NAME: "mpt-staging-scraper-cronjob" });
+    const lambda = browserLaunchOptions({ headless: false, chromium_sandbox: true });
+    assert.equal(lambda.chromiumSandbox, false);
+    assert.equal(lambda.headless, true);
+    assert.ok(lambda.args.includes("--no-sandbox"));
+    assert.equal(lambda.env.HOME, "/tmp");
 });

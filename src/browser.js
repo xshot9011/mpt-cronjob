@@ -22,18 +22,36 @@ Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
 `;
 
-/** Chromium launch flags. Lambda needs single-process/no-zygote to survive its
- * constrained process model; the rest reduce automation fingerprints. */
+/** Chromium launch flags. Lambda needs no-sandbox/single-process/no-zygote to
+ * survive its constrained process model; the rest reduce automation fingerprints. */
 function buildLaunchArgs() {
     const args = [
-        "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
         "--disable-blink-features=AutomationControlled",
         "--window-size=1920,1080",
     ];
-    if (isLambda()) args.push("--single-process", "--no-zygote", "--disable-dev-tools");
+    if (isLambda()) args.push("--no-sandbox", "--single-process", "--no-zygote", "--disable-dev-tools");
     return args;
+}
+
+/**
+ * Playwright launch options (without the proxy). Locally the Chromium sandbox
+ * stays on, since the scraper visits third-party sites on your own machine;
+ * config `chromium_sandbox: false` turns it off where it can't start (some
+ * Linux hosts). Lambda can't run the sandbox, so it is always off there.
+ */
+export function browserLaunchOptions(config) {
+    if (isLambda()) {
+        // No display on Lambda, and its task dir is read-only: Chromium needs a
+        // writable HOME for its profile/crashpad scratch space.
+        return { headless: true, chromiumSandbox: false, args: buildLaunchArgs(), env: { ...process.env, HOME: "/tmp" } };
+    }
+    return {
+        headless: toBool(config.headless, true),
+        chromiumSandbox: toBool(config.chromium_sandbox, true),
+        args: buildLaunchArgs(),
+    };
 }
 
 /**
@@ -57,14 +75,7 @@ async function resolveProxy(config, targetLogger) {
 
 /** Launch Chromium and return { browser, context }. The caller owns teardown. */
 export async function launchContext(config, targetLogger = logger) {
-    // Lambda has no display, so a visible browser is never possible there.
-    const headless = isLambda() ? true : toBool(config.headless, true);
-    const launchOptions = { headless, args: buildLaunchArgs() };
-    if (isLambda()) {
-        // Lambda's task dir is read-only; Chromium needs a writable HOME for its
-        // profile/crashpad scratch space.
-        launchOptions.env = { ...process.env, HOME: "/tmp" };
-    }
+    const launchOptions = browserLaunchOptions(config);
 
     const proxy = await resolveProxy(config, targetLogger);
     if (proxy) {
