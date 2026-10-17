@@ -1,6 +1,7 @@
 // Call the Lambda handler on your machine, without Docker:
 //   CONFIG_FILE=examples/get-xpath.json npm run invoke [-- event.json]
-// The optional event file may carry a "targets" array that overrides the config's.
+// The optional event file is the Lambda event: "targets" (overrides the config's),
+// "only" (configured target names) and/or "outputs" (configured output names; [] = none).
 import fs from "node:fs";
 import { handler } from "../src/lambda.js";
 
