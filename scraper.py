@@ -281,7 +281,7 @@ def _enter_frame(page, iframe_title, target_logger, step):
 
 
 # ---------------------------------------------------------------------------- #
-#                          TODO: Simplify action order                         #
+#                      CapSolver CAPTCHA solving integration                   #
 # ---------------------------------------------------------------------------- #
 def execute_actions(page, target_logger, actions, action_wait):
     """Execute a list of actions sequentially. Returns a list of extracted values from 'get' actions."""
