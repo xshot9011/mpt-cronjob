@@ -1,4 +1,7 @@
-FROM public.ecr.aws/lambda/python:3.13
+# AWS Lambda Node.js base image (Amazon Linux 2023).
+# For tamper-evident, reproducible builds pin the digest rather than the tag:
+#   FROM public.ecr.aws/lambda/nodejs:24@sha256:<digest>
+FROM public.ecr.aws/lambda/nodejs:24
 
 # Install the AL2023 shared libraries Playwright's Chromium needs at runtime.
 RUN dnf install -y \
@@ -9,21 +12,24 @@ RUN dnf install -y \
     xorg-x11-server-Xvfb xorg-x11-xauth dbus-glib dbus-glib-devel jq && \
     dnf clean all
 
-# Bake the Chromium build into the image at a fixed, read-only-safe location.
-# (Lambda's task dir is read-only at runtime, so the browser must live here and
-# HOME must point at the writable /tmp for Chromium's scratch/crashpad files.)
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-ENV HOME=/tmp
+WORKDIR ${LAMBDA_TASK_ROOT}
 
-# Install python dependencies
-COPY requirements.txt ${LAMBDA_TASK_ROOT}
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Bake the Chromium build into the image at a fixed, read-only-safe location.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# Install exactly what package-lock.json pins (integrity-hash checked), without
+# running any dependency lifecycle scripts.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
 
 # Download the Chromium revision that matches the pinned Playwright version.
-RUN python -m playwright install chromium
+RUN ./node_modules/.bin/playwright install chromium
+
+# Lambda's task dir is read-only at runtime, so HOME must point at the writable
+# /tmp for Chromium's scratch/crashpad files.
+ENV HOME=/tmp
 
 # Copy source code
-COPY scraper.py ${LAMBDA_TASK_ROOT}
-COPY lambda_function.py ${LAMBDA_TASK_ROOT}
+COPY src/ ./src/
 
-CMD ["lambda_function.lambda_handler"]
+CMD ["src/lambda.handler"]

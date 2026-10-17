@@ -1,9 +1,0 @@
-# Browser automation (official Playwright from Microsoft)
-playwright==1.60.0
-
-# AWS Secrets Manager access
-boto3==1.43.14
-botocore==1.43.14
-
-# Telegram notifications
-requests==2.33.0

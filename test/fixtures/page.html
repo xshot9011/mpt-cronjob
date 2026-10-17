@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Fixture Page</title>
+</head>
+<body>
+    <h1>Fixture</h1>
+    <input type="text" id="username">
+    <button type="button" id="btn">Click me</button>
+    <p id="count">Clicks: 0</p>
+    <iframe title="Inner frame" srcdoc="<p id='inner'>Inside the frame</p>"></iframe>
+
+    <script>
+        let count = 0;
+        document.getElementById("btn").addEventListener("click", () => {
+            count++;
+            document.getElementById("count").textContent = "Clicks: " + count;
+        });
+    </script>
+</body>
+</html>
