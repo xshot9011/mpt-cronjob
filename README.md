@@ -41,11 +41,12 @@ A Selenium-based web scraper built for both local environments (macOS/Linux) and
   ```
 
 3. **Configure Targets**:
-   Define `targets` with a sequence of `actions` (`click`, `get`, `fill`) in a JSON file. 
+   Define `targets` with a sequence of `actions` (`click`, `get`, `fill`, `solve_captcha`, `switch_path`, `sleep`) in a JSON file. 
    Check the `examples/` directory for sample configurations:
    - `examples/simple.json` - Basic `click` and `get` actions.
    - `examples/local.json` - Demonstrates `fill` action using raw strings.
    - `examples/local-secret-manager.json` - Demonstrates `fill` action integrating with AWS Secrets Manager.
+   - `examples/solve-captcha.json` - Demonstrates the `solve_captcha` action (CapSolver).
 
 4. **Run Manually**:
    You can run the scraper by pointing the `CONFIG_FILE` environment variable to your desired configuration:
@@ -104,6 +105,40 @@ For certain configuration fields (e.g., the `fill` action's `value_from`, `teleg
 - **Raw Strings**: `string['<value>']`
   *Example*: `"string['my_hardcoded_value']"` will be parsed directly as `"my_hardcoded_value"`.
 - **Plain Values**: Any value not matching the above syntax will be evaluated exactly as provided.
+
+---
+
+## 🤖 Solving CAPTCHAs (CapSolver)
+
+The `solve_captcha` action solves a CAPTCHA via [CapSolver](https://capsolver.com) and injects the resulting token into the page, so a subsequent `click` on the submit button proceeds. Place it **after** filling the form and **before** clicking submit.
+
+**Supported `captcha_type` values:** `recaptcha_v2`, `recaptcha_v3`, `turnstile` (Cloudflare), `hcaptcha`.
+
+```json
+{
+    "type": "solve_captcha",
+    "captcha_type": "recaptcha_v2",
+    "api_key_from": "secret_manager['my-app-secrets']['CAPSOLVER_API_KEY']",
+    "website_key": null,
+    "page_action": null,
+    "invoke_callback": true,
+    "timeout": "120s",
+    "continue_on_failure": false
+}
+```
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `captcha_type` | no | Defaults to `recaptcha_v2`. |
+| `api_key_from` | no | Your CapSolver key. Supports `secret_manager[...]`, `string[...]`, or a plain value (same resolution as `fill`'s `value_from`). If omitted, falls back to the `CAPSOLVER_API_KEY` env var. |
+| `website_key` | no | The CAPTCHA site key. If omitted/`null`, it is auto-detected from the page DOM (the `data-sitekey` attribute or the widget iframe). Provide it explicitly if auto-detection fails. |
+| `website_url` | no | Defaults to the current page URL. |
+| `page_action` | no | For `recaptcha_v3` (the action name, e.g. `login`); for `turnstile` it is passed as `metadata.action`. |
+| `invoke_callback` | no | Best-effort firing of the reCAPTCHA JS callback after injection (reCAPTCHA only). Default `false`. |
+| `timeout` | no | Max time to wait for CapSolver (`120` / `"120s"` / `"2m"`). Default 120s. |
+| `continue_on_failure` | no | If `true`, keep running remaining actions when solving fails. Default `false`. |
+
+> ⚠️ Only use against sites you are authorized to automate. CapSolver charges per solve from your prepaid balance.
 
 ---
 
