@@ -214,3 +214,7 @@ com.user.mpt-cronjob.plist
 
 driver/
 headless/
+
+# Node.js
+node_modules/
+npm-debug.log*

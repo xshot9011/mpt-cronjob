@@ -6,6 +6,14 @@ set -e
 # IMAGE_NAME= run with IMAGE_NAME=xxxxxxx sh ./build_image.sh
 ## Because I run out of token to accept from argument even it's easy m still lazy la
 
+: "${IMAGE_NAME:?Set IMAGE_NAME, e.g. IMAGE_NAME=mpt-staging-web-scraper ./build_image.sh}"
+
+# The image installs with `npm ci`, which only trusts the committed lockfile.
+if [ ! -f package-lock.json ]; then
+    echo "package-lock.json is missing. Run 'npm install' once and commit the lockfile." >&2
+    exit 1
+fi
+
 IMAGE_TAG="latest"
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "YOUR_AWS_ACCOUNT_ID")
 AWS_REGION="ap-southeast-7"
@@ -27,7 +35,7 @@ echo "=========================================="
 echo "Build Successful!"
 echo "=========================================="
 echo "To test locally, run:"
-echo "  docker run --platform linux/amd64 -p 9000:8080 ${IMAGE_NAME}:${IMAGE_TAG}"
+echo "  docker run --platform linux/amd64 -p 9000:8080 -e CONFIG_JSON=\"\$(cat examples/get-xpath.json)\" ${IMAGE_NAME}:${IMAGE_TAG}"
 echo "  curl -XPOST \"http://localhost:9000/2015-03-31/functions/function/invocations\" -d '{}'"
 echo ""
 echo "To push to AWS ECR, run:"

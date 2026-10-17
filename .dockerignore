@@ -1,0 +1,9 @@
+# Keep the build context to what the Dockerfile copies; never ship local
+# secrets, sessions or dependencies installed on the host.
+node_modules
+.git
+.npmrc
+.env*
+config.json
+*.log
+*.plist

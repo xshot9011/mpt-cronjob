@@ -1,0 +1,20 @@
+{
+  "name": "mpt-cronjob",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Playwright-based web scraper for local runs and AWS Lambda (container image).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "invoke": "node scripts/invoke-local.js",
+    "browser:install": "playwright install chromium",
+    "setup-cron": "node scripts/setup-cron.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "playwright": "1.60.0"
+  }
+}

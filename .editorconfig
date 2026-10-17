@@ -15,11 +15,6 @@ charset = utf-8
 indent_style = space
 indent_size = 2
 
-# 4 space indentation
-[*.py]
-indent_style = space
-indent_size = 4
-
 # Tab indentation (no size specified)
 [Makefile]
 indent_style = tab
@@ -28,3 +23,8 @@ indent_style = tab
 [lib/**.js]
 indent_style = space
 indent_size = 2
+
+# 4 space indentation for the Node.js sources (matches the JSON examples)
+[*.js]
+indent_style = space
+indent_size = 4
