@@ -7,7 +7,7 @@
     "targets": [
         {
             "name": "Accept cookies and get page title",
-            "url": "file://<absolute_path_to_login.html>",
+            "url": "file://./login.html",
             "actions": [
                 {
                     "type": "click",
