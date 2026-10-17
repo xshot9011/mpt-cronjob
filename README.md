@@ -170,12 +170,12 @@ docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/mpt-staging-web-scraper:
 - **IAM**: give the execution role `secretsmanager:GetSecretValue` on the secrets your config references.
 - **Memory/timeout**: 1024 MB or more, and a 3–5 minute timeout depending on targets.
 - **Event**: optional.
-  - EventBridge, console or CLI: `{ "only": ["<target name>"] }` runs just those configured targets. `{ "targets": [...] }` replaces the configured targets for that invocation.
+  - EventBridge, console or CLI: `{ "only": ["<target name>"] }` runs just those configured targets. `{ "targets": [...] }` replaces the configured targets for that invocation. When the config sets `http_api_key`, event `targets` are refused unless `allow_event_targets` is `true`.
   - `{ "outputs": ["<output name>"] }` sends the results only to those configured outputs; `[]` sends them nowhere. Without it, every configured output gets them. See [Outputs](#-outputs).
   - HTTP requests are handled differently; see [HTTP Trigger](#-http-trigger-google-sheets--api-gateway--function-url).
 - **Logs**: every refused invocation (bad event, unknown names, missing config) writes an `ERROR` line before it returns, so a failed scheduled run shows why in CloudWatch.
 
-On Lambda the browser always runs headless, and `keep_browser_open` is ignored.
+On Lambda the browser always runs headless without the Chromium sandbox, and `keep_browser_open` is ignored.
 
 ---
 
@@ -190,6 +190,8 @@ The same handler also accepts HTTP requests from API Gateway (REST or HTTP API) 
   ```json
   { "results": [ { "name": "ราคาทองคำ (สมาคมค้าทองคำ) - ทองคำแท่ง ขายออก", "value": "66,100.00" } ] }
   ```
+
+**Supported integrations:** API Gateway REST API with **Lambda proxy integration**, HTTP API, or a Lambda Function URL. Other request-style events (WebSocket APIs, VPC Lattice, anything else carrying `headers` / `body` / `requestContext`) are refused with `400`. Don't use a REST API **non-proxy** integration: it hands the handler the bare request body, which looks like a trusted invocation and skips the `x-api-key` check. As a backstop, a config with `http_api_key` refuses event `targets` (see `allow_event_targets`), so such a caller still can't run their own URLs or scripts.
 
 **Example config:**
 ```json
@@ -261,6 +263,8 @@ Some fields support dynamic values: the `fill` action's `value_from`, a Telegram
 | `action_wait` | `2` | Seconds to wait after each click/fill/switch_path/solve_captcha. |
 | `region` | _(unset)_ | AWS region for Secrets Manager lookups. |
 | `http_api_key` | _(unset)_ | Required for HTTP requests (API Gateway / Function URL); compared against the `x-api-key` header. Supports `secret_manager[...]`. Without it, HTTP access is refused. |
+| `allow_event_targets` | `true`, or `false` when `http_api_key` is set | Whether a trusted invocation's event may carry `targets`. Off by default on HTTP-facing functions, so caller-supplied URLs and scripts can't get in through a misconfigured integration. Set it explicitly to override. |
+| `chromium_sandbox` | `true` | Local runs only: keep Chromium's sandbox on while visiting third-party sites. Set to `false` only on hosts where the sandbox can't start (some Linux setups). Always off on Lambda, which can't run it. |
 | `outputs` | _(unset)_ | Named destinations for the results, e.g. `{ "telegram": { "type": "telegram", "bot_token": "...", "chat_id": "..." } }`. Each run sends to all of them unless its event picks some by name. See [Outputs](#-outputs). |
 | `telegram_bot_token` / `telegram_chat_id` | _(unset)_ | **Legacy.** Used only when `outputs` is not set: together they become one output named `telegram`. They fall back to the `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars. |
 | `user_agent` | recent desktop Chrome UA | Override the browser User-Agent string. |
