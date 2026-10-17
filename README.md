@@ -79,7 +79,8 @@ To upgrade Playwright:
    - `examples/fill-local-secret-manager.json`: `fill` with values from AWS Secrets Manager.
    - `examples/login-and-scrape.json`: log in, `sleep`, `switch_path`, then extract.
    - `examples/solve-captcha.json`: the `solve_captcha` action (CapSolver).
-   - `examples/telegram-notification.json`: send results to Telegram.
+   - `examples/telegram-notification.json`: send results to Telegram (legacy keys).
+   - `examples/outputs.json`: named outputs, which each run can pick from (see [Outputs](#-outputs)).
 
 4. **Run it:**
    ```bash
@@ -114,8 +115,12 @@ This runs two sets of tests:
 ```bash
 CONFIG_FILE=examples/get-xpath.json npm run invoke
 
-# Optional event file (its "targets" array overrides the config's)
+# Optional event file: the Lambda event ("targets", "only", "outputs")
 CONFIG_FILE=examples/get-xpath.json npm run invoke -- path/to/event.json
+
+# Scrape and log only, sending to no output
+echo '{ "outputs": [] }' > /tmp/event.json
+CONFIG_FILE=examples/outputs.json npm run invoke -- /tmp/event.json
 ```
 
 ### Run the real Lambda image
@@ -166,7 +171,9 @@ docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/mpt-staging-web-scraper:
 - **Memory/timeout**: 1024 MB or more, and a 3–5 minute timeout depending on targets.
 - **Event**: optional.
   - EventBridge, console or CLI: `{ "only": ["<target name>"] }` runs just those configured targets. `{ "targets": [...] }` replaces the configured targets for that invocation.
+  - `{ "outputs": ["<output name>"] }` sends the results only to those configured outputs; `[]` sends them nowhere. Without it, every configured output gets them. See [Outputs](#-outputs).
   - HTTP requests are handled differently; see [HTTP Trigger](#-http-trigger-google-sheets--api-gateway--function-url).
+- **Logs**: every refused invocation (bad event, unknown names, missing config) writes an `ERROR` line before it returns, so a failed scheduled run shows why in CloudWatch.
 
 On Lambda the browser always runs headless, and `keep_browser_open` is ignored.
 
@@ -178,7 +185,7 @@ The same handler also accepts HTTP requests from API Gateway (REST or HTTP API) 
 
 **What an HTTP request can do:**
 - **Auth:** it must send the `x-api-key` header, matching the config's `http_api_key`. The key is checked in constant time. If `http_api_key` is not set, every HTTP request gets `503`.
-- **Choose targets:** the JSON body may only carry `only`, which picks configured targets by name. Sending `targets` is refused, so a caller can't supply their own URLs, scripts or `secret_manager[...]` lookups.
+- **Choose targets and outputs:** the JSON body may only carry `only` and `outputs`, which pick configured targets and outputs by name. Sending `targets` is refused, so a caller can't supply their own URLs, scripts or `secret_manager[...]` lookups, and output names can't add a destination.
 - **Response:** the scraped values come back as JSON:
   ```json
   { "results": [ { "name": "ราคาทองคำ (สมาคมค้าทองคำ) - ทองคำแท่ง ขายออก", "value": "66,100.00" } ] }
@@ -233,7 +240,7 @@ function refreshGoldPrice() {
 
 ### Dynamic value resolution
 
-Some fields support dynamic values: the `fill` action's `value_from`, `telegram_bot_token`, `telegram_chat_id`, `proxy.username` / `proxy.password`, and `solve_captcha`'s `api_key_from`.
+Some fields support dynamic values: the `fill` action's `value_from`, a Telegram output's `bot_token` / `chat_id` (and the legacy `telegram_bot_token` / `telegram_chat_id`), `proxy.username` / `proxy.password`, and `solve_captcha`'s `api_key_from`.
 
 - **AWS Secrets Manager**: `secret_manager['<secret_name_or_arn>']['<json_key>']`
   - Example: `"secret_manager['my-credentials']['password']"` fetches the `password` key from the `my-credentials` secret.
@@ -254,7 +261,8 @@ Some fields support dynamic values: the `fill` action's `value_from`, `telegram_
 | `action_wait` | `2` | Seconds to wait after each click/fill/switch_path/solve_captcha. |
 | `region` | _(unset)_ | AWS region for Secrets Manager lookups. |
 | `http_api_key` | _(unset)_ | Required for HTTP requests (API Gateway / Function URL); compared against the `x-api-key` header. Supports `secret_manager[...]`. Without it, HTTP access is refused. |
-| `telegram_bot_token` / `telegram_chat_id` | _(unset)_ | Send the results to Telegram. These fall back to the `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars. |
+| `outputs` | _(unset)_ | Named destinations for the results, e.g. `{ "telegram": { "type": "telegram", "bot_token": "...", "chat_id": "..." } }`. Each run sends to all of them unless its event picks some by name. See [Outputs](#-outputs). |
+| `telegram_bot_token` / `telegram_chat_id` | _(unset)_ | **Legacy.** Used only when `outputs` is not set: together they become one output named `telegram`. They fall back to the `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars. |
 | `user_agent` | recent desktop Chrome UA | Override the browser User-Agent string. |
 | `locale` | `en-US` | Browser locale. |
 | `timezone_id` | `Asia/Bangkok` | Emulated timezone (match it to your proxy region). |
@@ -263,6 +271,41 @@ Some fields support dynamic values: the `fill` action's `value_from`, `telegram_
 | `proxy` | _(unset)_ | Residential proxy, e.g. `{ "server": "http://host:port", "username": "secret_manager['x']['PROXY_USER']", "password": "secret_manager['x']['PROXY_PASS']" }`. Routing through a residential IP is the biggest lever against Cloudflare when running from Lambda. |
 
 Boolean flags accept `true`/`false` or the strings `"true"`/`"false"`.
+
+---
+
+## 📤 Outputs
+
+An output is a named destination for a run's results. Destinations and credentials live in the config; an event only picks outputs by name, the same way `only` picks targets.
+
+```json
+{
+    "outputs": {
+        "telegram":       { "type": "telegram", "bot_token": "secret_manager['my-app-secrets']['TELEGRAM_BOT_TOKEN']", "chat_id": "secret_manager['my-app-secrets']['TELEGRAM_CHAT_ID']" },
+        "telegram-alert": { "type": "telegram", "bot_token": "...", "chat_id": "..." }
+    },
+    "targets": [ ... ]
+}
+```
+
+Event (EventBridge schedule, console, CLI or HTTP body):
+```json
+{ "only": ["SET TRI"], "outputs": ["telegram-alert"] }
+```
+
+- **No `outputs` in the event**: every configured output gets the results.
+- **`"outputs": []`**: scrape and log only; nothing is sent. Useful for test runs.
+- **Validation**: `outputs` must be a list of configured names, or the run is refused with `400` before scraping. An output with an unknown `type` in the config fails every run with `500`.
+- **Failures**: each output is sent separately. One failing is logged and doesn't stop the others.
+- **Legacy configs**: without `outputs`, `telegram_bot_token` / `telegram_chat_id` (or the `TELEGRAM_*` env vars) become one output named `telegram`, so v2.0.0 configs keep working. When `outputs` is set, the legacy keys are ignored.
+
+Output types:
+
+| `type` | Fields | What it does |
+|--------|--------|--------------|
+| `telegram` | `bot_token`, `chat_id` (both support `secret_manager[...]`) | Posts one message with every result. If either value resolves empty, a warning is logged and nothing is sent. |
+
+A new type is one sender function registered in `SENDERS` in [src/outputs.js](src/outputs.js); the selection rules don't change.
 
 ---
 
