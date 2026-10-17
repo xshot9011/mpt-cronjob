@@ -52,13 +52,13 @@ echo "=========================================="
 echo "-> Running podman build..."
 # podman build --platform linux/arm64 --format docker -t ${IMAGE_NAME}:${IMAGE_TAG} .
 podman build --platform linux/amd64 --format docker \
-    -t ${IMAGE_NAME}:${IMAGE_TAG} \
-    -t ${IMAGE_NAME}:${GIT_TAG} \
+    -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+    -t "${IMAGE_NAME}:${GIT_TAG}" \
     .
 
 echo "-> Tagging image for ECR..."
-podman tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_REPO}:${IMAGE_TAG}
-podman tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_REPO}:${GIT_TAG}
+podman tag "${IMAGE_NAME}:${IMAGE_TAG}" "${ECR_REPO}:${IMAGE_TAG}"
+podman tag "${IMAGE_NAME}:${IMAGE_TAG}" "${ECR_REPO}:${GIT_TAG}"
 
 echo "=========================================="
 echo "Build Successful!"

@@ -3,8 +3,10 @@ import path from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { buildSwitchPathUrl } from "../src/actions.js";
-import { apiKeyMatches, isHttpEvent, parseJsonBody } from "../src/http.js";
+import { browserLaunchOptions } from "../src/browser.js";
+import { apiKeyMatches, isHttpEvent, looksLikeHttpRequest, parseJsonBody } from "../src/http.js";
 import { handler } from "../src/lambda.js";
+import { OutputError, SENDERS, configuredOutputs, selectOutputs, sendOutputs } from "../src/outputs.js";
 import { parseDuration, resolveValue } from "../src/resolve.js";
 import { normalizeUrl } from "../src/scraper.js";
 import { getSecret, setSecretsRegion } from "../src/secrets.js";
@@ -270,4 +272,234 @@ test("scheduled events can use 'only' too", async (t) => {
     const { status, body } = await call(t, API_CONFIG, { only: ["Nope"] });
     assert.equal(status, 400);
     assert.equal(body.error, "Unknown target name(s): Nope");
+});
+
+// ---- Outputs ----
+
+const TARGETS = [{ name: "Gold", url: "https://example.com", actions: [{ type: "get", xpath: "//h1" }] }];
+const RESULTS = [{ name: "Gold - price", value: "100", options: [] }];
+const tg = (id) => ({ type: "telegram", bot_token: `string['bot-${id}']`, chat_id: `string['chat-${id}']` });
+const TWO_OUTPUTS = { outputs: { telegram: tg("a"), "telegram-alert": tg("b") } };
+
+/** A logger that records every line as "<LEVEL> <message>". */
+function recordingLogger() {
+    const lines = [];
+    const log = (level) => (message) => lines.push(`${level} ${message}`);
+    return { lines, debug: log("DEBUG"), info: log("INFO"), warning: log("WARNING"), error: log("ERROR") };
+}
+
+/** Capture console output for one test (the logger writes there). */
+function captureConsole(t) {
+    const lines = [];
+    for (const method of ["log", "warn", "error"]) {
+        const real = console[method];
+        console[method] = (...args) => lines.push(args.join(" "));
+        t.after(() => { console[method] = real; });
+    }
+    return lines;
+}
+
+/** Bot tokens of the Telegram messages sent through a stubbed fetch. */
+const sentBots = (calls) => calls.map(({ url }) => /\/bot([^/]+)\/sendMessage$/.exec(url)?.[1]);
+
+test("legacy telegram_* keys become one 'telegram' output", (t) => {
+    withEnv(t, { TELEGRAM_BOT_TOKEN: undefined, TELEGRAM_CHAT_ID: undefined });
+    assert.deepEqual(configuredOutputs({ telegram_bot_token: "tok", telegram_chat_id: "chat" }), {
+        telegram: { type: "telegram", bot_token: "tok", chat_id: "chat" },
+    });
+    assert.deepEqual(configuredOutputs({ telegram_bot_token: "tok" }), {});
+    assert.deepEqual(configuredOutputs({}), {});
+});
+
+test("the legacy Telegram output falls back to the TELEGRAM_* env vars; config 'outputs' wins", (t) => {
+    withEnv(t, { TELEGRAM_BOT_TOKEN: "env-tok", TELEGRAM_CHAT_ID: "env-chat" });
+    assert.deepEqual(configuredOutputs({}), { telegram: { type: "telegram", bot_token: "env-tok", chat_id: "env-chat" } });
+    assert.equal(configuredOutputs({ telegram_chat_id: "cfg-chat" }).telegram.chat_id, "cfg-chat");
+    assert.deepEqual(configuredOutputs({ outputs: {}, telegram_bot_token: "tok", telegram_chat_id: "chat" }), {});
+});
+
+test("selectOutputs: no names = all, [] = none, names = just those", () => {
+    assert.deepEqual(selectOutputs(TWO_OUTPUTS, undefined).map(([name]) => name), ["telegram", "telegram-alert"]);
+    assert.deepEqual(selectOutputs(TWO_OUTPUTS, []), []);
+    assert.deepEqual(selectOutputs(TWO_OUTPUTS, ["telegram-alert", "telegram-alert"]), [["telegram-alert", tg("b")]]);
+});
+
+test("selectOutputs rejects bad names with 400 and a bad config with 500", () => {
+    const fails = (config, names, statusCode, message) => assert.throws(
+        () => selectOutputs(config, names),
+        (e) => e instanceof OutputError && e.statusCode === statusCode && message.test(e.message),
+    );
+    fails(TWO_OUTPUTS, ["nope"], 400, /^Unknown output name\(s\): nope$/);
+    fails(TWO_OUTPUTS, ["toString"], 400, /^Unknown output name\(s\): toString$/);
+    fails(TWO_OUTPUTS, "telegram", 400, /must be a list/);
+    fails(TWO_OUTPUTS, [42], 400, /must be a list/);
+    fails({ outputs: { x: { type: "pigeon" } } }, undefined, 500, /^Output 'x' has unknown type 'pigeon'/);
+    fails({ outputs: { x: "telegram" } }, [], 500, /^Output 'x' has unknown type/);
+    fails({ outputs: [tg("a")] }, undefined, 500, /must be an object/);
+});
+
+test("sendOutputs sends only to the selected outputs and logs each one", async (t) => {
+    const calls = stubFetch(t, () => new Response("{}"));
+    const logger = recordingLogger();
+    await sendOutputs(selectOutputs(TWO_OUTPUTS, ["telegram-alert"]), RESULTS, logger);
+    assert.deepEqual(sentBots(calls), ["bot-b"]);
+    assert.equal(JSON.parse(calls[0].init.body).chat_id, "chat-b");
+    assert.ok(logger.lines.includes("INFO Sending results to output 'telegram-alert' (telegram)"));
+});
+
+test("sendOutputs sends nothing for [] or for empty results", async (t) => {
+    const calls = stubFetch(t, () => new Response("{}"));
+    await sendOutputs(selectOutputs(TWO_OUTPUTS, []), RESULTS, silent);
+    await sendOutputs(selectOutputs(TWO_OUTPUTS, undefined), [], silent);
+    assert.equal(calls.length, 0);
+});
+
+test("one failing Telegram output doesn't stop the next", async (t) => {
+    const calls = stubFetch(t, (url) => (String(url).includes("bot-a")
+        ? new Response("Bad Request: chat not found", { status: 400 })
+        : new Response("{}")));
+    const logger = recordingLogger();
+    await sendOutputs(selectOutputs(TWO_OUTPUTS, undefined), RESULTS, logger);
+    assert.deepEqual(sentBots(calls), ["bot-a", "bot-b"]);
+    assert.ok(logger.lines.includes("ERROR Failed to send Telegram message: Bad Request: chat not found"));
+    assert.ok(logger.lines.includes("INFO Successfully sent Telegram message."));
+});
+
+test("a sender that throws is logged and the next output still runs", async (t) => {
+    SENDERS.broken = async () => { throw new Error("boom"); };
+    t.after(() => { delete SENDERS.broken; });
+    const calls = stubFetch(t, () => new Response("{}"));
+    const logger = recordingLogger();
+    await sendOutputs(selectOutputs({ outputs: { first: { type: "broken" }, second: tg("b") } }, undefined), RESULTS, logger);
+    assert.deepEqual(sentBots(calls), ["bot-b"]);
+    assert.ok(logger.lines.includes("ERROR Output 'first' failed: boom"));
+});
+
+test("a Telegram output whose chat_id resolves empty logs a warning", async (t) => {
+    const calls = stubFetch(t, () => new Response("{}"));
+    const logger = recordingLogger();
+    await sendOutputs([["telegram", { type: "telegram", bot_token: "string['tok']", chat_id: "" }]], RESULTS, logger);
+    assert.equal(calls.length, 0);
+    assert.ok(logger.lines.includes("WARNING Telegram message not sent: chat_id is empty or could not be resolved."));
+});
+
+test("lambda handler rejects bad 'outputs' before scraping", async (t) => {
+    const calls = stubFetch(t, () => new Response("{}"));
+    const config = JSON.stringify({ ...TWO_OUTPUTS, targets: TARGETS });
+    for (const [outputs, error] of [
+        [["nope"], "Unknown output name(s): nope"],
+        ["telegram-alert", "'outputs' must be a list of output names."],
+        [[42], "'outputs' must be a list of output names."],
+    ]) {
+        const { status, body } = await call(t, config, { outputs });
+        assert.equal(status, 400);
+        assert.equal(body.error, error);
+    }
+    assert.equal(calls.length, 0);
+});
+
+test("HTTP requests can only name configured outputs", async (t) => {
+    const config = JSON.stringify({ ...JSON.parse(API_CONFIG), ...TWO_OUTPUTS });
+    const body = JSON.stringify({ only: ["Gold"], outputs: ["https://attacker.test"] });
+    const { status, body: res } = await call(t, config, httpEvent({ key: "test-key", body }));
+    assert.equal(status, 400);
+    assert.equal(res.error, "Unknown output name(s): https://attacker.test");
+});
+
+test("an unknown output type in config fails with 500 before scraping", async (t) => {
+    const config = JSON.stringify({ http_api_key: "string['test-key']", outputs: { x: { type: "pigeon" } }, targets: TARGETS });
+    const scheduled = await call(t, config, {});
+    assert.equal(scheduled.status, 500);
+    assert.match(scheduled.body.error, /^Output 'x' has unknown type 'pigeon'/);
+    // HTTP callers get the generic error; the details stay in the logs.
+    const viaHttp = await call(t, config, httpEvent({ key: "test-key" }));
+    assert.equal(viaHttp.status, 500);
+    assert.deepEqual(viaHttp.body, { error: "Internal error." });
+});
+
+test("every refused invocation writes a log line", async (t) => {
+    const lines = captureConsole(t);
+    const config = JSON.stringify({ ...TWO_OUTPUTS, targets: TARGETS });
+    const cases = [
+        [config, { only: [] }, 400],
+        [config, { only: ["Nope"] }, 400],
+        [config, { outputs: ["nope"] }, 400],
+        [JSON.stringify({ outputs: { x: { type: "pigeon" } }, targets: TARGETS }), {}, 500],
+        [JSON.stringify({ targets: [] }), {}, 400],
+        [API_CONFIG, httpEvent({ key: "test-key", body: "{oops" }), 400],
+        [API_CONFIG, httpEvent({ key: "test-key", body: JSON.stringify({ targets: TARGETS }) }), 400],
+        [API_CONFIG, httpEvent({ key: "wrong" }), 401],
+        [config, { body: JSON.stringify({ targets: TARGETS }) }, 400],
+        [API_CONFIG, { targets: TARGETS }, 400],
+    ];
+    for (const [cfg, event, expected] of cases) {
+        lines.length = 0;
+        const { status } = await call(t, cfg, event);
+        assert.equal(status, expected);
+        assert.ok(lines.some((l) => /\[(ERROR|WARNING)\]/.test(l)), `no log line for ${JSON.stringify(event)}`);
+    }
+
+    lines.length = 0;
+    withEnv(t, { CONFIG_JSON: undefined, CONFIG_FILE: "does-not-exist.json" });
+    assert.equal((await handler({})).statusCode, 500);
+    assert.ok(lines.some((l) => l.includes("[ERROR]") && l.includes("Configuration not found")));
+});
+
+// ---- Hardening ----
+
+test("looksLikeHttpRequest flags request-style events only", () => {
+    assert.equal(looksLikeHttpRequest(httpEvent()), true);
+    assert.equal(looksLikeHttpRequest({ body: "{}" }), true);
+    assert.equal(looksLikeHttpRequest({ targets: [], only: ["Gold"], outputs: [] }), false);
+    assert.equal(looksLikeHttpRequest({ source: "aws.events", "detail-type": "Scheduled Event", detail: {} }), false);
+    assert.equal(looksLikeHttpRequest(undefined), false);
+    assert.equal(looksLikeHttpRequest(null), false);
+});
+
+test("request-style events that aren't a supported HTTP shape are refused", async (t) => {
+    const calls = stubFetch(t, () => new Response("{}"));
+    const config = JSON.stringify({ targets: TARGETS });
+    for (const event of [
+        // API Gateway WebSocket: requestContext without http/httpMethod, so no x-api-key check would run.
+        { requestContext: { routeKey: "$default", connectionId: "abc", eventType: "MESSAGE" }, body: "{}" },
+        // VPC Lattice
+        { method: "POST", raw_path: "/", headers: { "x-api-key": "k" }, body: "{}" },
+        { headers: {}, body: JSON.stringify({ targets: TARGETS }) },
+    ]) {
+        const { status, body } = await call(t, config, event);
+        assert.equal(status, 400);
+        assert.match(body.error, /^Unsupported HTTP event/);
+    }
+    assert.equal(calls.length, 0);
+});
+
+test("event 'targets' are refused on HTTP-facing functions unless allow_event_targets is set", async (t) => {
+    // What an API Gateway non-proxy mapping would hand over from a request body.
+    const event = { targets: [{ name: "evil", url: "https://attacker.test", actions: [{ type: "get", script: "return 1" }] }] };
+    const refused = await call(t, API_CONFIG, event);
+    assert.equal(refused.status, 400);
+    assert.match(refused.body.error, /^'targets' in the event is disabled for this function/);
+
+    const optedOut = JSON.stringify({ allow_event_targets: "false", targets: TARGETS });
+    assert.equal((await call(t, optedOut, event)).status, 400);
+
+    // Opting in lets the event through to the usual checks.
+    const optedIn = JSON.stringify({ http_api_key: "string['test-key']", allow_event_targets: true, targets: [] });
+    assert.deepEqual((await call(t, optedIn, { targets: [] })).body, { error: "No targets configured." });
+});
+
+test("browserLaunchOptions keeps the Chromium sandbox on locally and off on Lambda", (t) => {
+    withEnv(t, { AWS_LAMBDA_FUNCTION_NAME: undefined });
+    const local = browserLaunchOptions({ headless: "false" });
+    assert.equal(local.chromiumSandbox, true);
+    assert.equal(local.headless, false);
+    assert.ok(!local.args.includes("--no-sandbox"));
+    assert.equal(browserLaunchOptions({ chromium_sandbox: "false" }).chromiumSandbox, false);
+
+    withEnv(t, { AWS_LAMBDA_FUNCTION_NAME: "mpt-staging-scraper-cronjob" });
+    const lambda = browserLaunchOptions({ headless: false, chromium_sandbox: true });
+    assert.equal(lambda.chromiumSandbox, false);
+    assert.equal(lambda.headless, true);
+    assert.ok(lambda.args.includes("--no-sandbox"));
+    assert.equal(lambda.env.HOME, "/tmp");
 });

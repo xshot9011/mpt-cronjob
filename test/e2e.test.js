@@ -87,6 +87,30 @@ test("an authorized HTTP request runs only the named target and returns its valu
     assert.deepEqual(JSON.parse(result.body), { results: [{ name: "Fixture - h1", value: "Fixture" }] });
 });
 
+test("lambda handler sends results only to the outputs the event selects", { skip: browserMissing, timeout: 60_000 }, async (t) => {
+    withLambdaConfig(t, {
+        headless: true,
+        wait_timeout: 0,
+        action_wait: 0,
+        outputs: {
+            telegram: { type: "telegram", bot_token: "string['bot-main']", chat_id: "string['chat-main']" },
+            "telegram-alert": { type: "telegram", bot_token: "string['bot-alert']", chat_id: "string['chat-alert']" },
+        },
+        targets: [{ name: "Fixture", url: FIXTURE_URL, actions: [{ type: "get", name: "h1", xpath: "//h1" }] }],
+    });
+    const realFetch = globalThis.fetch;
+    const urls = [];
+    globalThis.fetch = async (url) => {
+        urls.push(String(url));
+        return new Response("{}");
+    };
+    t.after(() => { globalThis.fetch = realFetch; });
+
+    const result = await handler({ outputs: ["telegram-alert"] });
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(urls, ["https://api.telegram.org/botbot-alert/sendMessage"]);
+});
+
 /**
  * Point the handler at `config` for one test. Also clears the TELEGRAM_*
  * fallbacks so a test never messages a real chat.

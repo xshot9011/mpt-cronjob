@@ -8,6 +8,17 @@ export function isHttpEvent(event) {
     return Boolean(event?.requestContext && (event.requestContext.http || event.httpMethod));
 }
 
+/**
+ * True for events that carry request-style keys. One that is not an isHttpEvent
+ * came through an integration we can't authenticate (WebSocket, VPC Lattice,
+ * API Gateway non-proxy mappings, ...), so the handler refuses it rather than
+ * treating it as a trusted invocation.
+ */
+export function looksLikeHttpRequest(event) {
+    return event !== null && typeof event === "object"
+        && ["requestContext", "headers", "body", "httpMethod", "rawPath", "isBase64Encoded"].some((k) => k in event);
+}
+
 /** Case-insensitive header lookup (v1 keeps the client's casing, v2 lower-cases). */
 export function getHeader(event, name) {
     const headers = event.headers || {};

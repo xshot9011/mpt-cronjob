@@ -34,13 +34,20 @@ export async function sendTelegramMessage(botToken, chatId, results, logger) {
 }
 
 /**
- * Send the results to Telegram when a bot token and chat id are configured
- * (config telegram_bot_token / telegram_chat_id, else the TELEGRAM_* env vars).
+ * Sender for `type: "telegram"` outputs. bot_token and chat_id accept
+ * secret_manager[...], string[...] or plain values.
  */
-export async function notifyTelegram(config, results, logger) {
-    const botToken = await resolveValue(config.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN, logger);
-    const chatId = await resolveValue(config.telegram_chat_id || process.env.TELEGRAM_CHAT_ID, logger);
-    if (botToken && chatId && results.length > 0) {
-        await sendTelegramMessage(botToken, chatId, results, logger);
+export async function sendTelegram(output, results, logger) {
+    if (results.length === 0) {
+        logger.info("No results to send to Telegram.");
+        return;
     }
+    const botToken = await resolveValue(output.bot_token, logger);
+    const chatId = await resolveValue(output.chat_id, logger);
+    const missing = Object.entries({ bot_token: botToken, chat_id: chatId }).filter(([, v]) => !v).map(([k]) => k);
+    if (missing.length > 0) {
+        logger.warning(`Telegram message not sent: ${missing.join(" and ")} is empty or could not be resolved.`);
+        return;
+    }
+    await sendTelegramMessage(botToken, chatId, results, logger);
 }
