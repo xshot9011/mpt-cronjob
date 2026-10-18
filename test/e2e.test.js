@@ -44,13 +44,13 @@ test("runAll runs every action type against a real page", { skip: browserMissing
     });
 
     assert.deepEqual(results, [
-        { name: "Fixture - title", value: "Fixture Page", options: [], target: "Fixture" },
-        { name: "Fixture - username", value: "my_test_user", options: [], target: "Fixture" },
-        { name: "Fixture - clicks", value: "Clicks: 2", options: [], target: "Fixture" },
-        { name: "Fixture - inside_iframe", value: "Inside the frame", options: [], target: "Fixture" },
-        { name: "Fixture - awaited", value: "42", options: [], target: "Fixture" },
-        { name: "Fixture - no_codeblock", value: "Fixture", options: ["--no-codeblock"], target: "Fixture" },
-        { name: "Fixture - after_soft_failure", value: "Fixture", options: [], target: "Fixture" },
+        { name: "Fixture - title", value: "Fixture Page", options: [], target: "Fixture", field: "title" },
+        { name: "Fixture - username", value: "my_test_user", options: [], target: "Fixture", field: "username" },
+        { name: "Fixture - clicks", value: "Clicks: 2", options: [], target: "Fixture", field: "clicks" },
+        { name: "Fixture - inside_iframe", value: "Inside the frame", options: [], target: "Fixture", field: "inside_iframe" },
+        { name: "Fixture - awaited", value: "42", options: [], target: "Fixture", field: "awaited" },
+        { name: "Fixture - no_codeblock", value: "Fixture", options: ["--no-codeblock"], target: "Fixture", field: "no_codeblock" },
+        { name: "Fixture - after_soft_failure", value: "Fixture", options: [], target: "Fixture", field: "after_soft_failure" },
     ]);
 });
 

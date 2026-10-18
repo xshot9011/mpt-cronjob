@@ -15,7 +15,8 @@ export function normalizeUrl(url) {
 
 /**
  * Open one target and run its actions. Returns the extracted items as
- * { name, value, options, target } (target = the target's name); never throws.
+ * { name, value, options, target, field? } (target = the target's name, field =
+ * the `get` action's name when it has one); never throws.
  */
 export async function scrapeTarget(page, name, url, actions, waitTimeout, actionWait) {
     const targetLogger = getLogger(name);
@@ -54,7 +55,7 @@ export async function scrapeTarget(page, name, url, actions, waitTimeout, action
         return results.map(({ name: field, value, options }) => {
             if (field) {
                 targetLogger.info(`Extraction successful: ${name}. ${field}: ${value}`);
-                return { name: `${name} - ${field}`, value, options, target: name };
+                return { name: `${name} - ${field}`, value, options, target: name, field };
             }
             targetLogger.info(`Extraction successful: ${name}. Value: ${value}`);
             return { name, value, options, target: name };

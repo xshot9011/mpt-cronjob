@@ -81,6 +81,7 @@ To upgrade Playwright:
    - `examples/solve-captcha.json`: the `solve_captcha` action (CapSolver).
    - `examples/telegram-notification.json`: send results to Telegram (legacy keys).
    - `examples/outputs.json`: named outputs, with each target picking its own (see [Outputs](#-outputs)).
+   - `examples/dynamodb.json`: one target sent to Telegram and to DynamoDB, choosing which values go into which columns (see [DynamoDB](#dynamodb)).
 
 4. **Run it:**
    ```bash
@@ -167,7 +168,7 @@ docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/mpt-staging-web-scraper:
   - `CONFIG_JSON`: optional. The entire config JSON; takes priority over `CONFIG_FILE`.
   - `CONFIG_FILE`: optional. Defaults to `config.json`.
   - `LOG_LEVEL`: `DEBUG`, `INFO`, `WARNING` or `ERROR`. Defaults to `INFO`.
-- **IAM**: give the execution role `secretsmanager:GetSecretValue` on the secrets your config references.
+- **IAM**: give the execution role `secretsmanager:GetSecretValue` on the secrets your config references, and `dynamodb:PutItem` on the tables its `dynamodb` outputs write to.
 - **Memory/timeout**: 1024 MB or more, and a 3–5 minute timeout depending on targets.
 - **Event**: optional.
   - EventBridge, console or CLI: `{ "only": ["<target name>"] }` runs just those configured targets. `{ "targets": [...] }` replaces the configured targets for that invocation. When the config sets `http_api_key`, event `targets` are refused unless `allow_event_targets` is `true`.
@@ -242,7 +243,7 @@ function refreshGoldPrice() {
 
 ### Dynamic value resolution
 
-Some fields support dynamic values: the `fill` action's `value_from`, a Telegram output's `bot_token` / `chat_id` (and the legacy `telegram_bot_token` / `telegram_chat_id`), `proxy.username` / `proxy.password`, and `solve_captcha`'s `api_key_from`.
+Some fields support dynamic values: the `fill` action's `value_from`, a Telegram output's `bot_token` / `chat_id` (and the legacy `telegram_bot_token` / `telegram_chat_id`), a DynamoDB output's `table`, `proxy.username` / `proxy.password`, and `solve_captcha`'s `api_key_from`.
 
 - **AWS Secrets Manager**: `secret_manager['<secret_name_or_arn>']['<json_key>']`
   - Example: `"secret_manager['my-credentials']['password']"` fetches the `password` key from the `my-credentials` secret.
@@ -261,7 +262,7 @@ Some fields support dynamic values: the `fill` action's `value_from`, a Telegram
 | `keep_browser_open` | `false` | Local and visible browser only: leave the window open after the run (press Ctrl+C to exit). |
 | `wait_timeout` | `15` | Seconds to wait after a page opens, before running actions. |
 | `action_wait` | `2` | Seconds to wait after each click/fill/switch_path/solve_captcha. |
-| `region` | _(unset)_ | AWS region for Secrets Manager lookups. |
+| `region` | _(unset)_ | AWS region for Secrets Manager lookups and DynamoDB outputs. |
 | `http_api_key` | _(unset)_ | Required for HTTP requests (API Gateway / Function URL); compared against the `x-api-key` header. Supports `secret_manager[...]`. Without it, HTTP access is refused. |
 | `allow_event_targets` | `true`, or `false` when `http_api_key` is set | Whether a trusted invocation's event may carry `targets`. Off by default on HTTP-facing functions, so caller-supplied URLs and scripts can't get in through a misconfigured integration. Set it explicitly to override. |
 | `chromium_sandbox` | `true` | Local runs only: keep Chromium's sandbox on while visiting third-party sites. Set to `false` only on hosts where the sandbox can't start (some Linux setups). Always off on Lambda, which can't run it. |
@@ -299,9 +300,10 @@ An output is a named destination for results. Destinations and credentials live 
 - **One message per output**: each output gets one batch per run, with the results of every target that names it.
 - **The event's `outputs`** (EventBridge, console, CLI or HTTP body) limits a run to those names: `{ "outputs": ["telegram-alert"] }` drops every other output for that run, and `{ "outputs": [] }` sends nothing at all. Useful for test runs. Without it, each target uses all the outputs it names.
 - **Targets sent in the event** (a cronjob's `targets`) carry their own `outputs` the same way.
+- **Per-target options**: an entry in a target's `outputs` can be `{ "name": "<output>", ...options }` instead of a plain name, to set options for that target only. Only `dynamodb` takes options for now (`columns`, see [DynamoDB](#dynamodb)).
 - **Validation** happens before scraping:
-  - An unknown output name, or `outputs` that isn't a list of strings, refuses the run. That's a `400` when the event sent the name (in its `outputs` or its `targets`), and a `500` when it comes from the configured targets.
-  - An output with an unknown `type` in the config fails every run with `500`.
+  - An unknown output name, `outputs` that isn't a list of names or `{ "name": ... }` objects, or options the output doesn't accept refuses the run. That's a `400` when the event sent it (in its `outputs` or its `targets`), and a `500` when it comes from the configured targets.
+  - An output with an unknown `type` or a bad definition (such as a `dynamodb` output without a `table`) fails every run with `500`.
 - **Failures**: each output is sent separately. One failing is logged and doesn't stop the others.
 - **Run log**: every run logs its routing, e.g. `Outputs: SET TRI -> telegram, telegram-alert; SET TRI debug -> none (log only).`
 - **Legacy configs**: without `outputs`, `telegram_bot_token` / `telegram_chat_id` (or the `TELEGRAM_*` env vars) define one output named `telegram`. Targets still have to name it (`"outputs": ["telegram"]`): **since v3.0.0, a v2.x config whose targets name no outputs only logs.** When `outputs` is set, the legacy keys are ignored.
@@ -311,8 +313,50 @@ Output types:
 | `type` | Fields | What it does |
 |--------|--------|--------------|
 | `telegram` | `bot_token`, `chat_id` (both support `secret_manager[...]`) | Posts one message with the results routed to it. If either value resolves empty, a warning is logged and nothing is sent. |
+| `dynamodb` | `table` (supports `secret_manager[...]`); optional `partition_key` (default `target`), `sort_key` (default `scraped_at`, `null` for none), `region` (default: the config's) | Writes one item per target routed to it. Each target's `columns` choose which values go in and under which column names. See [DynamoDB](#dynamodb). |
 
-A new type is one sender function registered in `SENDERS` in [src/outputs.js](src/outputs.js). Each result it receives carries its `target` name; the routing rules don't change.
+A new type is one sender function registered in `SENDERS` in [src/outputs.js](src/outputs.js), plus checks in `CHECKS` if it has a definition to validate or takes per-target options. Each result it receives carries its `target` name and its `field` (the `get` action's `name`); the routing rules don't change.
+
+### DynamoDB
+
+```json
+{
+    "outputs": {
+        "telegram": { "type": "telegram", "bot_token": "...", "chat_id": "..." },
+        "dynamodb": { "type": "dynamodb", "table": "set-tri-history" }
+    },
+    "targets": [
+        {
+            "name": "SET TRI", "url": "...", "actions": [ ... ],
+            "outputs": [
+                "telegram",
+                { "name": "dynamodb", "columns": { "date": "as_of", "BANK TRI": "bank_tri" } }
+            ]
+        }
+    ]
+}
+```
+
+Each run writes one item per target, for example:
+
+```json
+{ "target": "SET TRI", "scraped_at": "2026-10-18T02:00:00.000Z", "as_of": "17 ต.ค. 2569", "bank_tri": 1234.56 }
+```
+
+- **`columns`** maps a `get` action's `name` to the column its value goes in. Only the mapped fields are written; the target's other outputs still get every field (in `examples/dynamodb.json`, Telegram also gets `HELTH TRI`, which has no column). Name the output without options (`"outputs": ["dynamodb"]`) to write every field under its own name. A `get` without a `name` counts as the field `value`.
+- **Values**: a plain number (`1,234.56`, `-0.25`) is stored as a DynamoDB number, without the thousands separators. Anything else (`17 ต.ค. 2569`, `1.2%`, `007`) is stored as the scraped string.
+- **Keys**: the partition key is the target's name and the sort key is the run's time (ISO 8601, UTC), so every run adds an item. `partition_key` / `sort_key` rename them. With `"sort_key": null` (a table with only a partition key), each run overwrites the target's item, so the table holds the latest values only.
+- **Missing values**: a mapped field with no value (its extraction failed, or `columns` has a typo) is logged as a warning and left out. A target with nothing to write writes no item.
+- **Validation**: `columns` must map field names to non-empty column names, can't write a key attribute, and can't write the same column twice. See the [validation rules](#-outputs) above for `400` vs `500`.
+- **Failures**: one target's write failing is logged; the other targets are still written.
+- **Table and IAM**: the key attributes are strings. The execution role needs `dynamodb:PutItem` on the table. For example:
+
+```bash
+aws dynamodb create-table --table-name set-tri-history \
+  --attribute-definitions AttributeName=target,AttributeType=S AttributeName=scraped_at,AttributeType=S \
+  --key-schema AttributeName=target,KeyType=HASH AttributeName=scraped_at,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST
+```
 
 ---
 
