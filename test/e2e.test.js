@@ -44,13 +44,13 @@ test("runAll runs every action type against a real page", { skip: browserMissing
     });
 
     assert.deepEqual(results, [
-        { name: "Fixture - title", value: "Fixture Page", options: [] },
-        { name: "Fixture - username", value: "my_test_user", options: [] },
-        { name: "Fixture - clicks", value: "Clicks: 2", options: [] },
-        { name: "Fixture - inside_iframe", value: "Inside the frame", options: [] },
-        { name: "Fixture - awaited", value: "42", options: [] },
-        { name: "Fixture - no_codeblock", value: "Fixture", options: ["--no-codeblock"] },
-        { name: "Fixture - after_soft_failure", value: "Fixture", options: [] },
+        { name: "Fixture - title", value: "Fixture Page", options: [], target: "Fixture" },
+        { name: "Fixture - username", value: "my_test_user", options: [], target: "Fixture" },
+        { name: "Fixture - clicks", value: "Clicks: 2", options: [], target: "Fixture" },
+        { name: "Fixture - inside_iframe", value: "Inside the frame", options: [], target: "Fixture" },
+        { name: "Fixture - awaited", value: "42", options: [], target: "Fixture" },
+        { name: "Fixture - no_codeblock", value: "Fixture", options: ["--no-codeblock"], target: "Fixture" },
+        { name: "Fixture - after_soft_failure", value: "Fixture", options: [], target: "Fixture" },
     ]);
 });
 
@@ -87,7 +87,7 @@ test("an authorized HTTP request runs only the named target and returns its valu
     assert.deepEqual(JSON.parse(result.body), { results: [{ name: "Fixture - h1", value: "Fixture" }] });
 });
 
-test("lambda handler sends results only to the outputs the event selects", { skip: browserMissing, timeout: 60_000 }, async (t) => {
+test("lambda handler sends each target's results to the outputs that target names", { skip: browserMissing, timeout: 60_000 }, async (t) => {
     withLambdaConfig(t, {
         headless: true,
         wait_timeout: 0,
@@ -96,19 +96,25 @@ test("lambda handler sends results only to the outputs the event selects", { ski
             telegram: { type: "telegram", bot_token: "string['bot-main']", chat_id: "string['chat-main']" },
             "telegram-alert": { type: "telegram", bot_token: "string['bot-alert']", chat_id: "string['chat-alert']" },
         },
-        targets: [{ name: "Fixture", url: FIXTURE_URL, actions: [{ type: "get", name: "h1", xpath: "//h1" }] }],
+        targets: [],
     });
     const realFetch = globalThis.fetch;
-    const urls = [];
-    globalThis.fetch = async (url) => {
-        urls.push(String(url));
+    const sent = [];
+    globalThis.fetch = async (url, init) => {
+        sent.push({ url: String(url), text: JSON.parse(init.body).text });
         return new Response("{}");
     };
     t.after(() => { globalThis.fetch = realFetch; });
 
-    const result = await handler({ outputs: ["telegram-alert"] });
+    // The shape a terragrunt cronjob sends: targets in the event, each naming its outputs.
+    const result = await handler({
+        targets: [
+            { name: "Alerted", url: FIXTURE_URL, actions: [{ type: "get", name: "h1", xpath: "//h1" }], outputs: ["telegram-alert"] },
+            { name: "Logged only", url: FIXTURE_URL, actions: [{ type: "get", name: "title", script: "return document.title" }] },
+        ],
+    });
     assert.equal(result.statusCode, 200);
-    assert.deepEqual(urls, ["https://api.telegram.org/botbot-alert/sendMessage"]);
+    assert.deepEqual(sent, [{ url: "https://api.telegram.org/botbot-alert/sendMessage", text: "Alerted - h1\n<pre>Fixture</pre>" }]);
 });
 
 /**

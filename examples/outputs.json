@@ -19,11 +19,23 @@
         {
             "name": "Price check",
             "url": "https://example.com",
+            "outputs": ["telegram"],
             "actions": [
                 {
                     "type": "get",
                     "name": "current_price",
                     "xpath": "//h1"
+                }
+            ]
+        },
+        {
+            "name": "Page title (log only)",
+            "url": "https://example.com",
+            "actions": [
+                {
+                    "type": "get",
+                    "name": "title",
+                    "script": "return document.title"
                 }
             ]
         }

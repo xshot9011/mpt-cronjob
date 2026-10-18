@@ -10,6 +10,7 @@
     "targets": [
         {
             "name": "Login then extract dashboard data",
+            "outputs": ["telegram"],
             "url": "https://example.com/login",
             "actions": [
                 {

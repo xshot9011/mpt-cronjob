@@ -80,7 +80,7 @@ To upgrade Playwright:
    - `examples/login-and-scrape.json`: log in, `sleep`, `switch_path`, then extract.
    - `examples/solve-captcha.json`: the `solve_captcha` action (CapSolver).
    - `examples/telegram-notification.json`: send results to Telegram (legacy keys).
-   - `examples/outputs.json`: named outputs, which each run can pick from (see [Outputs](#-outputs)).
+   - `examples/outputs.json`: named outputs, with each target picking its own (see [Outputs](#-outputs)).
 
 4. **Run it:**
    ```bash
@@ -171,7 +171,7 @@ docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/mpt-staging-web-scraper:
 - **Memory/timeout**: 1024 MB or more, and a 3–5 minute timeout depending on targets.
 - **Event**: optional.
   - EventBridge, console or CLI: `{ "only": ["<target name>"] }` runs just those configured targets. `{ "targets": [...] }` replaces the configured targets for that invocation. When the config sets `http_api_key`, event `targets` are refused unless `allow_event_targets` is `true`.
-  - `{ "outputs": ["<output name>"] }` sends the results only to those configured outputs; `[]` sends them nowhere. Without it, every configured output gets them. See [Outputs](#-outputs).
+  - Each target sends its results to the outputs named in its own `outputs`; a target that names none only logs. `{ "outputs": ["<output name>"] }` in the event limits the run to those outputs, and `[]` sends nothing. See [Outputs](#-outputs).
   - HTTP requests are handled differently; see [HTTP Trigger](#-http-trigger-google-sheets--api-gateway--function-url).
 - **Logs**: every refused invocation (bad event, unknown names, missing config) writes an `ERROR` line before it returns, so a failed scheduled run shows why in CloudWatch.
 
@@ -265,8 +265,8 @@ Some fields support dynamic values: the `fill` action's `value_from`, a Telegram
 | `http_api_key` | _(unset)_ | Required for HTTP requests (API Gateway / Function URL); compared against the `x-api-key` header. Supports `secret_manager[...]`. Without it, HTTP access is refused. |
 | `allow_event_targets` | `true`, or `false` when `http_api_key` is set | Whether a trusted invocation's event may carry `targets`. Off by default on HTTP-facing functions, so caller-supplied URLs and scripts can't get in through a misconfigured integration. Set it explicitly to override. |
 | `chromium_sandbox` | `true` | Local runs only: keep Chromium's sandbox on while visiting third-party sites. Set to `false` only on hosts where the sandbox can't start (some Linux setups). Always off on Lambda, which can't run it. |
-| `outputs` | _(unset)_ | Named destinations for the results, e.g. `{ "telegram": { "type": "telegram", "bot_token": "...", "chat_id": "..." } }`. Each run sends to all of them unless its event picks some by name. See [Outputs](#-outputs). |
-| `telegram_bot_token` / `telegram_chat_id` | _(unset)_ | **Legacy.** Used only when `outputs` is not set: together they become one output named `telegram`. They fall back to the `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars. |
+| `outputs` | _(unset)_ | Named destinations for results, e.g. `{ "telegram": { "type": "telegram", "bot_token": "...", "chat_id": "..." } }`. Each target names the ones it sends to in its own `outputs`. See [Outputs](#-outputs). |
+| `telegram_bot_token` / `telegram_chat_id` | _(unset)_ | **Legacy.** Used only when `outputs` is not set: together they define one output named `telegram`, which targets still have to name. They fall back to the `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars. |
 | `user_agent` | recent desktop Chrome UA | Override the browser User-Agent string. |
 | `locale` | `en-US` | Browser locale. |
 | `timezone_id` | `Asia/Bangkok` | Emulated timezone (match it to your proxy region). |
@@ -280,7 +280,7 @@ Boolean flags accept `true`/`false` or the strings `"true"`/`"false"`.
 
 ## 📤 Outputs
 
-An output is a named destination for a run's results. Destinations and credentials live in the config; an event only picks outputs by name, the same way `only` picks targets.
+An output is a named destination for results. Destinations and credentials live in the config's `outputs`; each **target** names the outputs its results go to.
 
 ```json
 {
@@ -288,28 +288,31 @@ An output is a named destination for a run's results. Destinations and credentia
         "telegram":       { "type": "telegram", "bot_token": "secret_manager['my-app-secrets']['TELEGRAM_BOT_TOKEN']", "chat_id": "secret_manager['my-app-secrets']['TELEGRAM_CHAT_ID']" },
         "telegram-alert": { "type": "telegram", "bot_token": "...", "chat_id": "..." }
     },
-    "targets": [ ... ]
+    "targets": [
+        { "name": "SET TRI",       "url": "...", "actions": [ ... ], "outputs": ["telegram", "telegram-alert"] },
+        { "name": "SET TRI debug", "url": "...", "actions": [ ... ] }
+    ]
 }
 ```
 
-Event (EventBridge schedule, console, CLI or HTTP body):
-```json
-{ "only": ["SET TRI"], "outputs": ["telegram-alert"] }
-```
-
-- **No `outputs` in the event**: every configured output gets the results.
-- **`"outputs": []`**: scrape and log only; nothing is sent. Useful for test runs.
-- **Validation**: `outputs` must be a list of configured names, or the run is refused with `400` before scraping. An output with an unknown `type` in the config fails every run with `500`.
+- **A target without `outputs`** (or with `[]` / `null`) sends nowhere. Its values are still logged ("Extraction successful: ..."), so it is a log-only target.
+- **One message per output**: each output gets one batch per run, with the results of every target that names it.
+- **The event's `outputs`** (EventBridge, console, CLI or HTTP body) limits a run to those names: `{ "outputs": ["telegram-alert"] }` drops every other output for that run, and `{ "outputs": [] }` sends nothing at all. Useful for test runs. Without it, each target uses all the outputs it names.
+- **Targets sent in the event** (a cronjob's `targets`) carry their own `outputs` the same way.
+- **Validation** happens before scraping:
+  - An unknown output name, or `outputs` that isn't a list of strings, refuses the run. That's a `400` when the event sent the name (in its `outputs` or its `targets`), and a `500` when it comes from the configured targets.
+  - An output with an unknown `type` in the config fails every run with `500`.
 - **Failures**: each output is sent separately. One failing is logged and doesn't stop the others.
-- **Legacy configs**: without `outputs`, `telegram_bot_token` / `telegram_chat_id` (or the `TELEGRAM_*` env vars) become one output named `telegram`, so v2.0.0 configs keep working. When `outputs` is set, the legacy keys are ignored.
+- **Run log**: every run logs its routing, e.g. `Outputs: SET TRI -> telegram, telegram-alert; SET TRI debug -> none (log only).`
+- **Legacy configs**: without `outputs`, `telegram_bot_token` / `telegram_chat_id` (or the `TELEGRAM_*` env vars) define one output named `telegram`. Targets still have to name it (`"outputs": ["telegram"]`): **since v3.0.0, a v2.x config whose targets name no outputs only logs.** When `outputs` is set, the legacy keys are ignored.
 
 Output types:
 
 | `type` | Fields | What it does |
 |--------|--------|--------------|
-| `telegram` | `bot_token`, `chat_id` (both support `secret_manager[...]`) | Posts one message with every result. If either value resolves empty, a warning is logged and nothing is sent. |
+| `telegram` | `bot_token`, `chat_id` (both support `secret_manager[...]`) | Posts one message with the results routed to it. If either value resolves empty, a warning is logged and nothing is sent. |
 
-A new type is one sender function registered in `SENDERS` in [src/outputs.js](src/outputs.js); the selection rules don't change.
+A new type is one sender function registered in `SENDERS` in [src/outputs.js](src/outputs.js). Each result it receives carries its `target` name; the routing rules don't change.
 
 ---
 
