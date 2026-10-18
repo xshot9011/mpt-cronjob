@@ -1,5 +1,6 @@
 import { enterFrame, evalScript, humanizeMouse } from "./browser.js";
 import { solveCaptchaOnPage } from "./captcha.js";
+import { passChallenge } from "./challenge.js";
 import { parseDuration, resolveValue } from "./resolve.js";
 import { sleep, toBool } from "./util.js";
 
@@ -22,9 +23,11 @@ function stringifyResult(value) {
  * { value, options, name? }, or null when that extraction failed.
  *
  * A failing click/fill/switch_path/solve_captcha stops the remaining actions
- * unless the action sets continue_on_failure.
+ * unless the action sets continue_on_failure. A switch_path landing on a
+ * Cloudflare challenge that doesn't clear within `challengeTimeout` seconds
+ * counts as failing.
  */
-export async function executeActions(page, logger, actions, actionWait) {
+export async function executeActions(page, logger, actions, actionWait, challengeTimeout = 15) {
     const extracted = [];
 
     for (const [i, action] of actions.entries()) {
@@ -50,7 +53,10 @@ export async function executeActions(page, logger, actions, actionWait) {
             try {
                 const destination = buildSwitchPathUrl(page.url(), action.path ?? "");
                 logger.info(`Step ${step}: Switching path to '${destination}'...`);
-                await page.goto(destination, { waitUntil: "domcontentloaded" });
+                const response = await page.goto(destination, { waitUntil: "domcontentloaded" });
+                if (!(await passChallenge(page, response, challengeTimeout, logger))) {
+                    throw new Error(`blocked by a Cloudflare challenge that did not clear within ${challengeTimeout}s`);
+                }
                 logger.info(`Step ${step}: Navigated to '${destination}'. Waiting ${actionWait}s...`);
                 await sleep(actionWait);
                 await humanizeMouse(page, 2);

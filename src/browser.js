@@ -6,21 +6,34 @@ import { isLambda, randomInt, sleep, toBool } from "./util.js";
 
 const logger = getLogger("Scraper");
 
-// A realistic, recent desktop Chrome UA. Override via config "user_agent".
-export const DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    + "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 export const DEFAULT_VIEWPORT = { width: 1920, height: 1080 };
 
-// Init script injected into every page/frame before any site code runs.
-// Stock Playwright leaks navigator.webdriver=true and an empty window.chrome;
-// these patches smooth over the most obvious automation tells. (This is best
-// effort only -- a datacenter/Lambda IP remains the dominant Cloudflare signal.)
-const STEALTH_INIT_SCRIPT = `
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-window.chrome = window.chrome || { runtime: {} };
-Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-`;
+// No init script patches navigator: hand-rolled fakes (a plugins array of
+// numbers, webdriver=undefined where real Chrome says false) are themselves
+// bot tells. --disable-blink-features=AutomationControlled already reports
+// navigator.webdriver=false the way a normal browser does.
+
+/**
+ * A headless browser's User-Agent with the "HeadlessChrome" token swapped for
+ * "Chrome"; null when there is nothing to change. Everything else (platform,
+ * version) stays the browser's own, so the UA agrees with navigator.platform
+ * and the client hints.
+ */
+export function headfulUserAgent(userAgent) {
+    return userAgent.includes("HeadlessChrome") ? userAgent.replaceAll("HeadlessChrome", "Chrome") : null;
+}
+
+/** The User-Agent to emulate: config `user_agent`, else the browser's own made headful. */
+async function contextUserAgent(browser, config) {
+    if (config.user_agent) return config.user_agent;
+    const session = await browser.newBrowserCDPSession();
+    try {
+        const { userAgent } = await session.send("Browser.getVersion");
+        return headfulUserAgent(userAgent);
+    } finally {
+        await session.detach().catch(() => {});
+    }
+}
 
 /** Chromium launch flags. Lambda needs no-sandbox/single-process/no-zygote to
  * survive its constrained process model; the rest reduce automation fingerprints. */
@@ -40,14 +53,22 @@ function buildLaunchArgs() {
  * stays on, since the scraper visits third-party sites on your own machine;
  * config `chromium_sandbox: false` turns it off where it can't start (some
  * Linux hosts). Lambda can't run the sandbox, so it is always off there.
+ *
+ * Headless runs use the full Chromium build ("new headless"). Playwright's
+ * default for headless is the stripped-down chromium-headless-shell, which is
+ * far easier to fingerprint; config `headless_shell: true` goes back to it.
  */
 export function browserLaunchOptions(config) {
+    const channel = toBool(config.headless_shell) ? {} : { channel: "chromium" };
     if (isLambda()) {
         // No display on Lambda, and its task dir is read-only: Chromium needs a
         // writable HOME for its profile/crashpad scratch space.
-        return { headless: true, chromiumSandbox: false, args: buildLaunchArgs(), env: { ...process.env, HOME: "/tmp" } };
+        return {
+            ...channel, headless: true, chromiumSandbox: false, args: buildLaunchArgs(), env: { ...process.env, HOME: "/tmp" },
+        };
     }
     return {
+        ...channel,
         headless: toBool(config.headless, true),
         chromiumSandbox: toBool(config.chromium_sandbox, true),
         args: buildLaunchArgs(),
@@ -85,27 +106,33 @@ export async function launchContext(config, targetLogger = logger) {
 
     const browser = await chromium.launch(launchOptions);
     try {
-        const contextOptions = {
-            userAgent: config.user_agent || DEFAULT_USER_AGENT,
-            viewport: config.viewport || DEFAULT_VIEWPORT,
-            locale: config.locale || "en-US",
-            timezoneId: config.timezone_id || "Asia/Bangkok",
-        };
-        // Reuse a saved login/session across runs so we are not doing a fresh
-        // (suspicious) cold login every time. Path is also written back on teardown.
-        if (config.storage_state && fs.existsSync(config.storage_state)) {
-            targetLogger.info(`Restoring browser session from ${config.storage_state}`);
-            contextOptions.storageState = config.storage_state;
-        }
-
-        const context = await browser.newContext(contextOptions);
-        await context.addInitScript(STEALTH_INIT_SCRIPT);
-        context.setDefaultTimeout(15_000);
+        const context = await newContext(browser, config, targetLogger);
         return { browser, context };
     } catch (e) {
         await browser.close();
         throw e;
     }
+}
+
+/** A new context (fresh cookies, apart from storage_state) on a launched browser. */
+export async function newContext(browser, config, targetLogger = logger) {
+    const contextOptions = {
+        viewport: config.viewport || DEFAULT_VIEWPORT,
+        locale: config.locale || "en-US",
+        timezoneId: config.timezone_id || "Asia/Bangkok",
+    };
+    const userAgent = await contextUserAgent(browser, config);
+    if (userAgent) contextOptions.userAgent = userAgent;
+    // Reuse a saved login/session across runs so we are not doing a fresh
+    // (suspicious) cold login every time. Path is also written back on teardown.
+    if (config.storage_state && fs.existsSync(config.storage_state)) {
+        targetLogger.info(`Restoring browser session from ${config.storage_state}`);
+        contextOptions.storageState = config.storage_state;
+    }
+
+    const context = await browser.newContext(contextOptions);
+    context.setDefaultTimeout(15_000);
+    return context;
 }
 
 /** Drift the mouse around to mimic human interaction. Best effort; never throws. */
