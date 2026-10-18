@@ -3,13 +3,15 @@ import path from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { buildSwitchPathUrl } from "../src/actions.js";
+import { setAwsRegion } from "../src/aws.js";
 import { browserLaunchOptions } from "../src/browser.js";
+import { buildDynamoItems, toDynamoNumber } from "../src/dynamodb.js";
 import { apiKeyMatches, isHttpEvent, looksLikeHttpRequest, parseJsonBody } from "../src/http.js";
 import { handler } from "../src/lambda.js";
 import { OutputError, SENDERS, configuredOutputs, describeRoutes, routeOutputs, sendOutputs } from "../src/outputs.js";
 import { parseDuration, resolveValue } from "../src/resolve.js";
 import { normalizeUrl } from "../src/scraper.js";
-import { getSecret, setSecretsRegion } from "../src/secrets.js";
+import { getSecret } from "../src/secrets.js";
 import { signRequest } from "../src/sigv4.js";
 import { buildTelegramMessage } from "../src/telegram.js";
 import { toBool } from "../src/util.js";
@@ -60,9 +62,10 @@ function fakeAws(t) {
         AWS_SESSION_TOKEN: undefined,
         AWS_ENDPOINT_URL: undefined,
         AWS_ENDPOINT_URL_SECRETS_MANAGER: undefined,
+        AWS_ENDPOINT_URL_DYNAMODB: undefined,
     });
-    setSecretsRegion("ap-southeast-7");
-    t.after(() => setSecretsRegion(undefined));
+    setAwsRegion("ap-southeast-7");
+    t.after(() => setAwsRegion(undefined));
 }
 
 test("parseDuration accepts seconds and h/m/s suffixes", () => {
@@ -157,8 +160,8 @@ test("getSecret surfaces AWS error responses; resolveValue turns them into null"
 
 test("getSecret fails clearly without credentials", async (t) => {
     withEnv(t, { AWS_ACCESS_KEY_ID: undefined, AWS_SECRET_ACCESS_KEY: undefined });
-    setSecretsRegion("ap-southeast-7");
-    t.after(() => setSecretsRegion(undefined));
+    setAwsRegion("ap-southeast-7");
+    t.after(() => setAwsRegion(undefined));
     await assert.rejects(getSecret("x", "y"), /No AWS credentials/);
 });
 
@@ -213,8 +216,8 @@ function httpEvent({ key, body, v1 = false } = {}) {
     return { version: "2.0", requestContext: { http: { method: "POST" } }, headers: key === undefined ? {} : { "x-api-key": key }, body };
 }
 
-async function call(t, config, event) {
-    withEnv(t, { CONFIG_JSON: config, LOG_LEVEL: "ERROR" });
+async function call(t, config, event, logLevel = "ERROR") {
+    withEnv(t, { CONFIG_JSON: config, LOG_LEVEL: logLevel });
     const result = await handler(event);
     return { status: result.statusCode, body: JSON.parse(result.body) };
 }
@@ -280,7 +283,7 @@ const TARGETS = [{ name: "Gold", url: "https://example.com", actions: [{ type: "
 const tg = (id) => ({ type: "telegram", bot_token: `string['bot-${id}']`, chat_id: `string['chat-${id}']` });
 const TWO_OUTPUTS = { outputs: { telegram: tg("a"), "telegram-alert": tg("b") } };
 const target = (name, outputs) => ({ name, url: "https://example.com", actions: [], ...(outputs === undefined ? {} : { outputs }) });
-const result = (targetName, field) => ({ name: `${targetName} - ${field}`, value: "1", options: [], target: targetName });
+const result = (targetName, field, value = "1") => ({ name: `${targetName} - ${field}`, value, options: [], target: targetName, field });
 
 /** A logger that records every line as "<LEVEL> <message>". */
 function recordingLogger() {
@@ -434,6 +437,174 @@ test("a Telegram output whose chat_id resolves empty logs a warning", async (t) 
     assert.ok(logger.lines.includes("WARNING Telegram message not sent: chat_id is empty or could not be resolved."));
 });
 
+// ---- DynamoDB ----
+
+const DYNAMO = { type: "dynamodb", table: "set-tri" };
+const WITH_DYNAMO = { outputs: { telegram: tg("a"), dynamodb: DYNAMO } };
+const NOW = new Date("2026-10-18T02:00:00Z");
+
+test("toDynamoNumber keeps plain numbers and leaves everything else a string", () => {
+    assert.equal(toDynamoNumber("1,234.56"), "1234.56");
+    assert.equal(toDynamoNumber(" 987.65 "), "987.65");
+    assert.equal(toDynamoNumber("+50"), "50");
+    assert.equal(toDynamoNumber("-0.25"), "-0.25");
+    assert.equal(toDynamoNumber("0"), "0");
+    assert.equal(toDynamoNumber(42), "42");
+    for (const text of ["17 ต.ค. 2569", "1.2%", "007", "1,23", "12,34.5", ".5", "", "1e5", "9".repeat(39)]) {
+        assert.equal(toDynamoNumber(text), null, text);
+    }
+});
+
+test("routeOutputs: an outputs entry can be { name, ...options }, kept per target", () => {
+    const columns = { "BANK TRI": "bank_tri" };
+    const targets = [target("SET TRI", ["telegram", { name: "dynamodb", columns }]), target("Gold", ["dynamodb"])];
+    const routes = routeOutputs(WITH_DYNAMO, targets, undefined);
+    assert.deepEqual([...routes], [
+        ["SET TRI", [["telegram", tg("a"), {}], ["dynamodb", DYNAMO, { columns }]]],
+        ["Gold", [["dynamodb", DYNAMO, {}]]],
+    ]);
+    assert.equal(describeRoutes(routes), "SET TRI -> telegram, dynamodb; Gold -> dynamodb");
+    // The event's outputs still limit the run; the options come along.
+    assert.deepEqual(routeOutputs(WITH_DYNAMO, targets, ["dynamodb"]).get("SET TRI"), [["dynamodb", DYNAMO, { columns }]]);
+});
+
+test("routeOutputs: a name and an options entry for one output combine; options given twice are refused", () => {
+    const columns = { price: "price" };
+    const routes = routeOutputs(WITH_DYNAMO, [target("Gold", ["dynamodb", { name: "dynamodb", columns }, "dynamodb"])], undefined);
+    assert.deepEqual(routes.get("Gold"), [["dynamodb", DYNAMO, { columns }]]);
+    assert.throws(
+        () => routeOutputs(WITH_DYNAMO, [
+            target("Gold", [{ name: "dynamodb", columns }]),
+            target("Gold", [{ name: "dynamodb", columns }]),
+        ], undefined),
+        (e) => e instanceof OutputError && e.statusCode === 500
+            && e.message === "Target 'Gold': output 'dynamodb' is given options more than once.",
+    );
+});
+
+test("routeOutputs rejects bad output options (400 from the event, 500 from config) and bad dynamodb definitions (500)", () => {
+    const fails = (config, entries, targetsFromEvent, statusCode, message) => assert.throws(
+        () => routeOutputs(config, [target("Gold", entries)], undefined, { targetsFromEvent }),
+        (e) => e instanceof OutputError && e.statusCode === statusCode && e.message === message,
+    );
+    const at = "Target 'Gold', output";
+    const badColumns = `${at} 'dynamodb': 'columns' must map field names to column names.`;
+    fails(WITH_DYNAMO, [{ name: "telegram", columns: {} }], true, 400, `${at} 'telegram': telegram outputs take no options (got columns).`);
+    fails(WITH_DYNAMO, [{ name: "dynamodb", columns: { a: "x" }, colums: {} }], false, 500,
+        `${at} 'dynamodb': unknown option(s) colums (dynamodb takes 'columns').`);
+    fails(WITH_DYNAMO, [{ name: "dynamodb", columns: ["price"] }], true, 400, badColumns);
+    fails(WITH_DYNAMO, [{ name: "dynamodb", columns: {} }], true, 400, badColumns);
+    fails(WITH_DYNAMO, [{ name: "dynamodb", columns: { price: "" } }], true, 400, badColumns);
+    fails(WITH_DYNAMO, [{ name: "dynamodb", columns: { date: "scraped_at" } }], false, 500,
+        `${at} 'dynamodb': column 'scraped_at' is one of the table's key attributes.`);
+    fails(WITH_DYNAMO, [{ name: "dynamodb", columns: { buy: "price", sell: "price" } }], false, 500,
+        `${at} 'dynamodb': more than one field writes column 'price'.`);
+    fails(WITH_DYNAMO, [{ columns: {} }], true, 400, "Target 'Gold': 'outputs' must be a list of output names or { \"name\": ... } objects.");
+    fails(WITH_DYNAMO, [{ name: "nope" }], true, 400, "Target 'Gold': unknown output name(s): nope");
+
+    const badDefinition = (definition, message) => fails(
+        { outputs: { dynamodb: { type: "dynamodb", ...definition } } }, ["dynamodb"], true, 500, `Output 'dynamodb' (dynamodb) ${message}`,
+    );
+    badDefinition({}, "needs a 'table'.");
+    badDefinition({ table: "t", partition_key: "" }, "'partition_key' must be a non-empty string.");
+    badDefinition({ table: "t", sort_key: 5 }, "'sort_key' must be a non-empty string, or null for a table without one.");
+    badDefinition({ table: "t", sort_key: "target" }, "'partition_key' and 'sort_key' must differ.");
+});
+
+test("buildDynamoItems writes one item per target: only the mapped columns with 'columns', every field without", () => {
+    const logger = recordingLogger();
+    const columns = { date: "as_of", "BANK TRI": "bank_tri", "SET50 TRI": "set50_tri" };
+    const items = buildDynamoItems(DYNAMO, [
+        result("SET TRI", "date", "17 ต.ค. 2569"),
+        result("SET TRI", "BANK TRI", "1,234.56"),
+        result("SET TRI", "HELTH TRI", "987.65"),
+        result("Gold", "price", "41,250.00"),
+        { name: "Gold", value: "up", options: [], target: "Gold" }, // a get without a name
+    ], new Map([["SET TRI", { columns }], ["Gold", {}]]), NOW, logger);
+
+    const scrapedAt = { S: "2026-10-18T02:00:00.000Z" };
+    assert.deepEqual(items, [
+        {
+            target: "SET TRI",
+            item: { target: { S: "SET TRI" }, scraped_at: scrapedAt, as_of: { S: "17 ต.ค. 2569" }, bank_tri: { N: "1234.56" } },
+        },
+        { target: "Gold", item: { target: { S: "Gold" }, scraped_at: scrapedAt, price: { N: "41250.00" }, value: { S: "up" } } },
+    ]);
+    assert.ok(logger.lines.includes("WARNING DynamoDB: no value for 'SET TRI' field(s) SET50 TRI; those columns are left out."));
+});
+
+test("buildDynamoItems uses the output's key names; sort_key null leaves the sort key out", () => {
+    const output = { type: "dynamodb", table: "latest", partition_key: "id", sort_key: null };
+    const logger = recordingLogger();
+    const items = buildDynamoItems(output, [result("Gold", "price", "100"), result("Gold", "id", "x")], new Map([["Gold", {}]]), NOW, logger);
+    assert.deepEqual(items, [{ target: "Gold", item: { id: { S: "Gold" }, price: { N: "100" } } }]);
+    assert.ok(logger.lines.includes("WARNING DynamoDB: 'Gold' field 'id' not written: 'id' is a key attribute."));
+});
+
+test("a dynamodb output writes one signed PutItem per target routed to it", async (t) => {
+    fakeAws(t);
+    const calls = stubFetch(t, () => new Response("{}"));
+    const routes = routeOutputs(WITH_DYNAMO, [
+        target("SET TRI", ["telegram", { name: "dynamodb", columns: { "BANK TRI": "bank_tri" } }]),
+        target("Gold", ["dynamodb"]),
+        target("Debug"),
+    ], undefined);
+    const logger = recordingLogger();
+    await sendOutputs(routes, [
+        result("SET TRI", "BANK TRI", "1,234.56"),
+        result("SET TRI", "HELTH TRI", "987.65"),
+        result("Gold", "price", "100"),
+        result("Debug", "probe"),
+    ], logger);
+
+    const puts = calls.filter(({ url }) => url.startsWith("https://dynamodb."));
+    assert.deepEqual(puts.map(({ url }) => url), Array(2).fill("https://dynamodb.ap-southeast-7.amazonaws.com/"));
+    const { headers } = puts[0].init;
+    assert.equal(headers["x-amz-target"], "DynamoDB_20120810.PutItem");
+    assert.equal(headers["content-type"], "application/x-amz-json-1.0");
+    assert.match(headers.authorization, /\/ap-southeast-7\/dynamodb\/aws4_request, /);
+    const [setTri, gold] = puts.map(({ init }) => JSON.parse(init.body));
+    assert.equal(setTri.TableName, "set-tri");
+    assert.deepEqual(Object.keys(setTri.Item), ["target", "scraped_at", "bank_tri"]);
+    assert.deepEqual(setTri.Item.bank_tri, { N: "1234.56" });
+    assert.deepEqual(Object.keys(gold.Item), ["target", "scraped_at", "price"]);
+
+    // Telegram still gets every SET TRI field: columns only shape the DynamoDB item.
+    const telegram = calls.find(({ url }) => url.includes("api.telegram.org"));
+    assert.equal(JSON.parse(telegram.init.body).text, "SET TRI - BANK TRI\n<pre>1,234.56</pre>\nSET TRI - HELTH TRI\n<pre>987.65</pre>");
+    assert.ok(logger.lines.includes("INFO Wrote 2 item(s) to DynamoDB table 'set-tri'."));
+});
+
+test("a failing PutItem is logged and the next target is still written; 'region' picks the table's region", async (t) => {
+    fakeAws(t);
+    const calls = stubFetch(t, (url, init) => (JSON.parse(init.body).Item.target.S === "SET TRI"
+        ? new Response(JSON.stringify({
+            __type: "com.amazonaws.dynamodb.v20120810#ResourceNotFoundException",
+            message: "Requested resource not found",
+        }), { status: 400 })
+        : new Response("{}")));
+    const config = { outputs: { dynamodb: { ...DYNAMO, region: "us-east-1" } } };
+    const routes = routeOutputs(config, [target("SET TRI", ["dynamodb"]), target("Gold", ["dynamodb"])], undefined);
+    const logger = recordingLogger();
+    await sendOutputs(routes, [result("SET TRI", "BANK TRI"), result("Gold", "price")], logger);
+
+    assert.deepEqual(calls.map(({ url }) => url), Array(2).fill("https://dynamodb.us-east-1.amazonaws.com/"));
+    assert.ok(logger.lines.includes(
+        "ERROR Failed to write 'SET TRI' to DynamoDB table 'set-tri': ResourceNotFoundException: Requested resource not found",
+    ));
+    assert.ok(logger.lines.includes("INFO Wrote 1 item(s) to DynamoDB table 'set-tri'."));
+});
+
+test("lambda handler rejects bad dynamodb columns in event targets with 400 before scraping", async (t) => {
+    const calls = stubFetch(t, () => new Response("{}"));
+    const { status, body } = await call(t, JSON.stringify({ ...WITH_DYNAMO, targets: [] }), {
+        targets: [target("Gold", [{ name: "dynamodb", columns: { price: "scraped_at" } }])],
+    });
+    assert.equal(status, 400);
+    assert.equal(body.error, "Target 'Gold', output 'dynamodb': column 'scraped_at' is one of the table's key attributes.");
+    assert.equal(calls.length, 0);
+});
+
 test("lambda handler rejects bad 'outputs' before scraping", async (t) => {
     const calls = stubFetch(t, () => new Response("{}"));
     const config = JSON.stringify({ ...TWO_OUTPUTS, targets: TARGETS });
@@ -498,7 +669,8 @@ test("every refused invocation writes a log line", async (t) => {
     ];
     for (const [cfg, event, expected] of cases) {
         lines.length = 0;
-        const { status } = await call(t, cfg, event);
+        // WARNING, not ERROR: a wrong x-api-key is logged as a warning.
+        const { status } = await call(t, cfg, event, "WARNING");
         assert.equal(status, expected);
         assert.ok(lines.some((l) => /\[(ERROR|WARNING)\]/.test(l)), `no log line for ${JSON.stringify(event)}`);
     }
