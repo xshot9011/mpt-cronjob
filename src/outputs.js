@@ -1,4 +1,5 @@
 import { checkDynamoOutput, checkDynamoRoute, sendDynamoDB } from "./dynamodb.js";
+import { checkSheetsOutput, checkSheetsRoute, sendGoogleSheets } from "./sheets.js";
 import { sendTelegram } from "./telegram.js";
 import { isPlainObject, targetName } from "./util.js";
 
@@ -8,14 +9,17 @@ import { isPlainObject, targetName } from "./util.js";
  * change. optionsByTarget maps each target name to the options that target
  * gave the output in its `outputs` ({} when it just named it).
  */
-export const SENDERS = { telegram: sendTelegram, dynamodb: sendDynamoDB };
+export const SENDERS = { telegram: sendTelegram, dynamodb: sendDynamoDB, google_sheets: sendGoogleSheets };
 
 /**
  * Output type -> checks returning an error message or null: `output` checks a
  * configured definition, `route` the options a target gives it with
  * { "name": ..., ...options }. A type missing here takes no options.
  */
-export const CHECKS = { dynamodb: { output: checkDynamoOutput, route: checkDynamoRoute } };
+export const CHECKS = {
+    dynamodb: { output: checkDynamoOutput, route: checkDynamoRoute },
+    google_sheets: { output: checkSheetsOutput, route: checkSheetsRoute },
+};
 
 /** A bad output selection: statusCode is 400 for a bad request, 500 for a bad config. */
 export class OutputError extends Error {
@@ -61,7 +65,7 @@ export function configuredOutputs(config) {
  * the configured outputs named in its `outputs`, and nowhere when it names
  * none (its values are still logged). An entry can be a name or
  * { "name": ..., ...options } with options for that output type (a dynamodb
- * output's `columns`). `runNames` (the event's `outputs`), when given,
+ * output's `columns`, a google_sheets output's `tab` and `columns`). `runNames` (the event's `outputs`), when given,
  * limits the whole run to those names; [] sends nothing. Targets that share a
  * name share their outputs, as they do for `only`.
  *

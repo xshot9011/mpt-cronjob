@@ -9,7 +9,7 @@ A Playwright-based web scraper written in Node.js. It runs locally (macOS/Linux)
   - **Local**: run manually, or schedule it with macOS `launchd`.
   - **Cloud**: AWS Lambda container image (`public.ecr.aws/lambda/nodejs`), scheduled by EventBridge.
 - **Dynamic config**: targets and actions come from a JSON file or an environment variable.
-- **Integrations**: AWS Secrets Manager, Telegram, CapSolver.
+- **Integrations**: AWS Secrets Manager, Telegram, DynamoDB, Google Sheets, CapSolver.
 
 > **Note on Cloudflare:** running headless from an AWS/Lambda datacenter IP is the
 > weakest position against Cloudflare's managed challenges. The scraper applies
@@ -27,6 +27,7 @@ The project keeps its dependency surface as small as possible.
 
 - **One runtime dependency**: `playwright`, pinned to an exact version. Its only dependencies are `playwright-core` from the same Microsoft release, plus the optional, macOS-only `fsevents`.
 - **No AWS SDK**: Secrets Manager is called directly with a small SigV4 signer ([src/sigv4.js](src/sigv4.js)) built on `node:crypto`. This avoids the roughly 80 transitive packages the SDK would pull in.
+- **No Google SDK**: Google Sheets is called with the built-in `fetch`, and the service-account JWT is signed with `node:crypto` ([src/google.js](src/google.js)).
 - **No HTTP / test libraries**: Telegram and CapSolver use Node's built-in `fetch`. Tests use the built-in `node:test`.
 - **[.npmrc](.npmrc)**: `ignore-scripts=true` stops dependency install scripts from running. `save-exact=true` keeps exact pins, and `engine-strict=true` enforces the Node version.
 - **Lockfile**: `package-lock.json` records an integrity hash for every package. CI and the Docker build use `npm ci`, which installs exactly what the lockfile pins.
@@ -82,6 +83,7 @@ To upgrade Playwright:
    - `examples/telegram-notification.json`: send results to Telegram (legacy keys).
    - `examples/outputs.json`: named outputs, with each target picking its own (see [Outputs](#-outputs)).
    - `examples/dynamodb.json`: one target sent to Telegram and to DynamoDB, choosing which values go into which columns (see [DynamoDB](#dynamodb)).
+   - `examples/google-sheets.json`: the gold price sent to Telegram and appended as a row to a Google Sheet tab (see [Google Sheets](#google-sheets)).
 
 4. **Run it:**
    ```bash
@@ -168,7 +170,7 @@ docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/mpt-staging-web-scraper:
   - `CONFIG_JSON`: optional. The entire config JSON; takes priority over `CONFIG_FILE`.
   - `CONFIG_FILE`: optional. Defaults to `config.json`.
   - `LOG_LEVEL`: `DEBUG`, `INFO`, `WARNING` or `ERROR`. Defaults to `INFO`.
-- **IAM**: give the execution role `secretsmanager:GetSecretValue` on the secrets your config references, and `dynamodb:PutItem` on the tables its `dynamodb` outputs write to.
+- **IAM**: give the execution role `secretsmanager:GetSecretValue` on the secrets your config references, and `dynamodb:PutItem` on the tables its `dynamodb` outputs write to. `google_sheets` outputs need nothing more than reading the secret that holds the key.
 - **Memory/timeout**: 1024 MB or more, and a 3–5 minute timeout depending on targets.
 - **Event**: optional.
   - EventBridge, console or CLI: `{ "only": ["<target name>"] }` runs just those configured targets. `{ "targets": [...] }` replaces the configured targets for that invocation. When the config sets `http_api_key`, event `targets` are refused unless `allow_event_targets` is `true`.
@@ -243,7 +245,7 @@ function refreshGoldPrice() {
 
 ### Dynamic value resolution
 
-Some fields support dynamic values: the `fill` action's `value_from`, a Telegram output's `bot_token` / `chat_id` (and the legacy `telegram_bot_token` / `telegram_chat_id`), a DynamoDB output's `table`, `proxy.username` / `proxy.password`, and `solve_captcha`'s `api_key_from`.
+Some fields support dynamic values: the `fill` action's `value_from`, a Telegram output's `bot_token` / `chat_id` (and the legacy `telegram_bot_token` / `telegram_chat_id`), a DynamoDB output's `table`, a Google Sheets output's `spreadsheet_id` / `client_email` / `private_key` / `tab`, `proxy.username` / `proxy.password`, and `solve_captcha`'s `api_key_from`.
 
 - **AWS Secrets Manager**: `secret_manager['<secret_name_or_arn>']['<json_key>']`
   - Example: `"secret_manager['my-credentials']['password']"` fetches the `password` key from the `my-credentials` secret.
@@ -300,10 +302,10 @@ An output is a named destination for results. Destinations and credentials live 
 - **One message per output**: each output gets one batch per run, with the results of every target that names it.
 - **The event's `outputs`** (EventBridge, console, CLI or HTTP body) limits a run to those names: `{ "outputs": ["telegram-alert"] }` drops every other output for that run, and `{ "outputs": [] }` sends nothing at all. Useful for test runs. Without it, each target uses all the outputs it names.
 - **Targets sent in the event** (a cronjob's `targets`) carry their own `outputs` the same way.
-- **Per-target options**: an entry in a target's `outputs` can be `{ "name": "<output>", ...options }` instead of a plain name, to set options for that target only. Only `dynamodb` takes options for now (`columns`, see [DynamoDB](#dynamodb)).
+- **Per-target options**: an entry in a target's `outputs` can be `{ "name": "<output>", ...options }` instead of a plain name, to set options for that target only. `dynamodb` takes `columns` (see [DynamoDB](#dynamodb)), and `google_sheets` takes `tab` and `columns` (see [Google Sheets](#google-sheets)).
 - **Validation** happens before scraping:
   - An unknown output name, `outputs` that isn't a list of names or `{ "name": ... }` objects, or options the output doesn't accept refuses the run. That's a `400` when the event sent it (in its `outputs` or its `targets`), and a `500` when it comes from the configured targets.
-  - An output with an unknown `type` or a bad definition (such as a `dynamodb` output without a `table`) fails every run with `500`.
+  - An output with an unknown `type` or a bad definition (such as a `dynamodb` output without a `table`, or a `google_sheets` output without a `private_key`) fails every run with `500`.
 - **Failures**: each output is sent separately. One failing is logged and doesn't stop the others.
 - **Run log**: every run logs its routing, e.g. `Outputs: SET TRI -> telegram, telegram-alert; SET TRI debug -> none (log only).`
 - **Legacy configs**: without `outputs`, `telegram_bot_token` / `telegram_chat_id` (or the `TELEGRAM_*` env vars) define one output named `telegram`. Targets still have to name it (`"outputs": ["telegram"]`): **since v3.0.0, a v2.x config whose targets name no outputs only logs.** When `outputs` is set, the legacy keys are ignored.
@@ -314,6 +316,7 @@ Output types:
 |--------|--------|--------------|
 | `telegram` | `bot_token`, `chat_id` (both support `secret_manager[...]`) | Posts one message with the results routed to it. If either value resolves empty, a warning is logged and nothing is sent. |
 | `dynamodb` | `table` (supports `secret_manager[...]`); optional `partition_key` (default `target`), `sort_key` (default `scraped_at`, `null` for none), `region` (default: the config's) | Writes one item per target routed to it. Each target's `columns` choose which values go in and under which column names. See [DynamoDB](#dynamodb). |
+| `google_sheets` | `spreadsheet_id`, `client_email`, `private_key`, optional `tab` (all support `secret_manager[...]`) | Appends one row per target routed to it, placing each value under its column name in the tab's header row. Each target can set its own `tab` and `columns`. See [Google Sheets](#google-sheets). |
 
 A new type is one sender function registered in `SENDERS` in [src/outputs.js](src/outputs.js), plus checks in `CHECKS` if it has a definition to validate or takes per-target options. Each result it receives carries its `target` name and its `field` (the `get` action's `name`); the routing rules don't change.
 
@@ -357,6 +360,57 @@ aws dynamodb create-table --table-name set-tri-history \
   --key-schema AttributeName=target,KeyType=HASH AttributeName=scraped_at,KeyType=RANGE \
   --billing-mode PAY_PER_REQUEST
 ```
+
+### Google Sheets
+
+```json
+{
+    "outputs": {
+        "telegram": { "type": "telegram", "bot_token": "...", "chat_id": "..." },
+        "sheets": {
+            "type": "google_sheets",
+            "spreadsheet_id": "<id from the sheet URL>",
+            "client_email": "mpt-scraper@my-project.iam.gserviceaccount.com",
+            "private_key": "secret_manager['my-app-secrets']['GOOGLE_PRIVATE_KEY']",
+            "tab": "prices"
+        }
+    },
+    "targets": [
+        {
+            "name": "ราคาทองคำ (สมาคมค้าทองคำ)", "url": "...", "actions": [ ... ],
+            "outputs": [
+                "telegram",
+                { "name": "sheets", "tab": "gold", "columns": { "ทองคำแท่ง รับซื้อ": "bar_buy", "ทองคำแท่ง ขายออก": "bar_sell" } }
+            ]
+        }
+    ]
+}
+```
+
+Each run appends one row per target to its tab, for example:
+
+| scraped_at | target | bar_buy | bar_sell |
+|------------|--------|---------|----------|
+| 2026-10-18T02:00:00.000Z | ราคาทองคำ (สมาคมค้าทองคำ) | 65900 | 66100 |
+
+- **`spreadsheet_id`** is the part of the sheet's URL between `/d/` and `/edit`. All four output fields support `secret_manager[...]`.
+- **Tab**: a target's `tab` wins over the output's; one of them must be set. The tab must already exist. The output never creates tabs, and a missing one is logged as an error for that target.
+- **`columns`** works as for DynamoDB: only the mapped fields are written, under the mapped names. Name the output without `columns` to write every field under its own name. A `get` without a `name` counts as the field `value`. `scraped_at` and `target` are reserved.
+- **Header row**: row 1 of the tab holds the column names, and each value goes in the column with its name. If row 1 is empty, the header is written first. Names missing from the header are added to its end. Existing headers are never moved or renamed, so you can rearrange columns or add your own; columns the output doesn't write stay empty in new rows.
+- **Values**: a plain number (`66,100.00`) is written as a number, without the thousands separators, when it has at most 15 digits (what Sheets can store exactly). Anything else is written as text, and so is `scraped_at` (ISO 8601, UTC). Every write uses `valueInputOption=RAW`, so scraped text such as `=IMPORTXML(...)` stays text and never becomes a formula.
+- **Missing values**: a mapped field with no value is logged as a warning and its cell is left empty. A target with nothing to write gets no row.
+- **Validation**: `tab` must be a non-empty string, and `columns` follows the DynamoDB rules. See the [validation rules](#-outputs) above for `400` vs `500`.
+- **Failures**: one target failing (a missing tab, a protected range) is logged; the other targets are still appended. Each run logs `Appended N row(s) to Google Sheet <id>.`
+- **Auth**: the service-account JWT is signed in-process and exchanged for an access token. The token is cached until 5 minutes before it expires, so warm Lambda invocations reuse it. The key, the JWT and the token are never logged.
+
+Setup:
+
+1. Create a Google Cloud project and enable the Google Sheets API.
+2. Create a service account (no roles) and a JSON key for it.
+3. Share the sheet with the service account's email as Editor.
+4. Put the key's `private_key` in Secrets Manager and `client_email` in the config. The key can be stored with real newlines or with `\n` escapes, as the Secrets Manager console usually saves it.
+
+No new AWS IAM permission is needed beyond `secretsmanager:GetSecretValue` on the secret that holds the key. Access to the sheet itself is controlled by sharing it with the service account.
 
 ---
 

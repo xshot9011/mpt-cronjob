@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import path from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -6,12 +7,14 @@ import { buildSwitchPathUrl } from "../src/actions.js";
 import { setAwsRegion } from "../src/aws.js";
 import { browserLaunchOptions } from "../src/browser.js";
 import { buildDynamoItems, toDynamoNumber } from "../src/dynamodb.js";
+import { a1Range, accessToken, columnLetters, googleErrorMessage, serviceAccountJwt } from "../src/google.js";
 import { apiKeyMatches, isHttpEvent, looksLikeHttpRequest, parseJsonBody } from "../src/http.js";
 import { handler } from "../src/lambda.js";
 import { OutputError, SENDERS, configuredOutputs, describeRoutes, routeOutputs, sendOutputs } from "../src/outputs.js";
 import { parseDuration, resolveValue } from "../src/resolve.js";
 import { normalizeUrl } from "../src/scraper.js";
 import { getSecret } from "../src/secrets.js";
+import { buildSheetsRecords, placeRecord, toSheetsCell } from "../src/sheets.js";
 import { signRequest } from "../src/sigv4.js";
 import { buildTelegramMessage } from "../src/telegram.js";
 import { toBool } from "../src/util.js";
@@ -679,6 +682,349 @@ test("every refused invocation writes a log line", async (t) => {
     withEnv(t, { CONFIG_JSON: undefined, CONFIG_FILE: "does-not-exist.json" });
     assert.equal((await handler({})).statusCode, 500);
     assert.ok(lines.some((l) => l.includes("[ERROR]") && l.includes("Configuration not found")));
+});
+
+// ---- Google Sheets ----
+
+const { privateKey: RSA_KEY, publicKey: RSA_PUBLIC_KEY } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+const PRIVATE_PEM = RSA_KEY.export({ type: "pkcs8", format: "pem" });
+const ESCAPED_PEM = PRIVATE_PEM.replace(/\n/g, "\\n"); // as the Secrets Manager console often stores it
+const TOKEN_URL = "https://oauth2.googleapis.com/token";
+const SHEET_URL = "https://sheets.googleapis.com/v4/spreadsheets/sheet-123";
+const APPEND = "valueInputOption=RAW&insertDataOption=INSERT_ROWS";
+const THAI_TAB = "ราคา ทอง (บาท)";
+const ISO_TIME = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
+const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
+
+/** A google_sheets output. Tokens are cached per client_email, so each test passes its own account. */
+const sheetsOutput = (account, extra = {}) => ({
+    type: "google_sheets",
+    spreadsheet_id: "sheet-123",
+    client_email: `${account}@mpt-test.iam.gserviceaccount.com`,
+    private_key: PRIVATE_PEM,
+    tab: "prices",
+    ...extra,
+});
+const SHEETS = sheetsOutput("validation", { private_key: "secret_manager['google-sheets']['GOOGLE_PRIVATE_KEY']" });
+const WITH_SHEETS = { outputs: { telegram: tg("a"), sheets: SHEETS } };
+const { tab: _, ...SHEETS_NO_TAB } = SHEETS;
+
+/**
+ * Stub Google: the token endpoint issues ya29.test-token-1, -2, ...; the
+ * Sheets API lists the tabs in `headers` (tab -> row 1, [] when empty) and
+ * answers row-1 reads from it; writes succeed. `respond(url, init)` answers
+ * first when it returns a Response. Returns the recorded calls.
+ */
+function stubGoogle(t, headers, respond = () => null) {
+    let issued = 0;
+    return stubFetch(t, (url, init) => {
+        const href = String(url);
+        const answer = respond(href, init);
+        if (answer) return answer;
+        if (href === TOKEN_URL) return json({ access_token: `ya29.test-token-${++issued}`, expires_in: 3599, token_type: "Bearer" });
+        const rest = href.slice(SHEET_URL.length);
+        if (rest === "?fields=sheets.properties.title") {
+            return json({ sheets: Object.keys(headers).map((title) => ({ properties: { title } })) });
+        }
+        if (init.method !== "GET") return json({});
+        const range = decodeURIComponent(rest.slice("/values/".length));
+        const header = headers[/^'(.*)'!1:1$/.exec(range)[1].replace(/''/g, "'")];
+        return json(header.length > 0 ? { range, majorDimension: "ROWS", values: [header] } : { range, majorDimension: "ROWS" });
+    });
+}
+
+/** The recorded Sheets calls as [method, decoded path and query, body?], with ISO timestamps shown as "<now>". */
+const sheetsRequests = (calls) => calls.filter(({ url }) => url.startsWith(SHEET_URL)).map(({ url, init }) => {
+    const call = [init.method, decodeURIComponent(url.slice(SHEET_URL.length))];
+    if (init.body === undefined) return call;
+    return [...call, JSON.parse(init.body, (k, v) => (typeof v === "string" && ISO_TIME.test(v) ? "<now>" : v))];
+});
+
+test("serviceAccountJwt signs an RS256 JWT for the Sheets scope; a key with escaped \\n works", () => {
+    const now = Date.parse("2026-10-18T02:00:00Z");
+    const email = "jwt@mpt-test.iam.gserviceaccount.com";
+    for (const key of [PRIVATE_PEM, ESCAPED_PEM]) {
+        const [header, claims, signature] = serviceAccountJwt(email, key, now).split(".");
+        assert.deepEqual(JSON.parse(Buffer.from(header, "base64url").toString()), { alg: "RS256", typ: "JWT" });
+        assert.deepEqual(JSON.parse(Buffer.from(claims, "base64url").toString()), {
+            iss: email,
+            scope: "https://www.googleapis.com/auth/spreadsheets",
+            aud: "https://oauth2.googleapis.com/token",
+            iat: now / 1000,
+            exp: now / 1000 + 3600,
+        });
+        assert.ok(crypto.verify("sha256", Buffer.from(`${header}.${claims}`), RSA_PUBLIC_KEY, Buffer.from(signature, "base64url")));
+    }
+    assert.throws(() => serviceAccountJwt(email, "not a key", now), /^Error: private_key is not a valid PEM private key\.$/);
+});
+
+test("accessToken is cached per client_email and refreshed 5 minutes before it expires", async (t) => {
+    let issued = 0;
+    const calls = stubFetch(t, () => json({ access_token: `tok-${++issued}`, expires_in: 3600, token_type: "Bearer" }));
+    const email = "cache@mpt-test.iam.gserviceaccount.com";
+    const t0 = Date.parse("2026-10-18T02:00:00Z");
+    assert.equal(await accessToken(email, PRIVATE_PEM, t0), "tok-1");
+    assert.equal(await accessToken(email, PRIVATE_PEM, t0 + 54 * 60_000), "tok-1");
+    assert.equal(await accessToken(email, PRIVATE_PEM, t0 + 55 * 60_000), "tok-2");
+    assert.equal(await accessToken("other@mpt-test.iam.gserviceaccount.com", PRIVATE_PEM, t0 + 55 * 60_000), "tok-3");
+
+    assert.equal(calls.length, 3);
+    const [{ url, init }] = calls;
+    assert.equal(url, TOKEN_URL);
+    assert.equal(init.method, "POST");
+    assert.equal(init.headers["content-type"], "application/x-www-form-urlencoded");
+    const form = new URLSearchParams(init.body);
+    assert.equal(form.get("grant_type"), "urn:ietf:params:oauth:grant-type:jwt-bearer");
+    assert.equal(form.get("assertion"), serviceAccountJwt(email, PRIVATE_PEM, t0));
+});
+
+test("googleErrorMessage reads both Google error shapes", () => {
+    assert.equal(
+        googleErrorMessage(400, JSON.stringify({ error: "invalid_grant", error_description: "Invalid JWT Signature." })),
+        "invalid_grant: Invalid JWT Signature.",
+    );
+    assert.equal(
+        googleErrorMessage(404, JSON.stringify({ error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND" } })),
+        "NOT_FOUND: Requested entity was not found.",
+    );
+    assert.equal(googleErrorMessage(502, "<html>Bad Gateway</html>"), "HTTP 502: <html>Bad Gateway</html>");
+});
+
+test("A1 helpers: column letters, and tab names quoted with ' doubled", () => {
+    assert.deepEqual([0, 25, 26, 51, 701, 702].map((i) => columnLetters(i)), ["A", "Z", "AA", "AZ", "ZZ", "AAA"]);
+    assert.equal(a1Range("prices", "A1"), "'prices'!A1");
+    assert.equal(a1Range("Bob's (gold)", "1:1"), "'Bob''s (gold)'!1:1");
+    assert.equal(a1Range(THAI_TAB, "A1:E1"), "'ราคา ทอง (บาท)'!A1:E1");
+});
+
+test("toSheetsCell writes plain numbers as numbers, up to the 15 digits Sheets keeps", () => {
+    assert.equal(toSheetsCell("66,100.00"), 66100);
+    assert.equal(toSheetsCell("+50"), 50);
+    assert.equal(toSheetsCell("-0.25"), -0.25);
+    assert.equal(toSheetsCell("123456789012345"), 123456789012345);
+    for (const text of ["1234567890123456", "17 ต.ค. 2569", "1.2%", "007", "=1+1", ""]) {
+        assert.equal(toSheetsCell(text), text, text);
+    }
+});
+
+test("buildSheetsRecords: only the mapped fields with 'columns', every field without; missing values are warned", () => {
+    const logger = recordingLogger();
+    const records = buildSheetsRecords([
+        result("Gold", "ทองคำแท่ง ขายออก", "66,100.00"),
+        result("Gold", "วันที่", "18 ต.ค. 2569"),
+        result("Gold", "Gold spot", "2,401.5"), // not mapped
+        result("SET TRI", "BANK TRI", "1,234.56"),
+        result("SET TRI", "pct", "1.2%"),
+        result("SET TRI", "code", "007"),
+        result("SET TRI", "target", "x"), // reserved
+        { name: "SET TRI", value: "up", options: [], target: "SET TRI" }, // a get without a name
+        result("Empty", "price", "1"),
+    ], new Map([
+        ["Gold", { columns: { "ทองคำแท่ง รับซื้อ": "bar_buy", "ทองคำแท่ง ขายออก": "bar_sell", "วันที่": "date" } }],
+        ["SET TRI", {}],
+        ["Empty", { columns: { volume: "volume" } }],
+    ]), NOW, logger);
+
+    const scrapedAt = "2026-10-18T02:00:00.000Z";
+    assert.deepEqual(records.map(({ target, record }) => [target, [...record]]), [
+        ["Gold", [["scraped_at", scrapedAt], ["target", "Gold"], ["bar_sell", 66100], ["date", "18 ต.ค. 2569"]]],
+        ["SET TRI", [
+            ["scraped_at", scrapedAt], ["target", "SET TRI"], ["BANK TRI", 1234.56], ["pct", "1.2%"], ["code", "007"], ["value", "up"],
+        ]],
+    ]);
+    assert.ok(logger.lines.includes("WARNING Google Sheets: no value for 'Gold' field(s) ทองคำแท่ง รับซื้อ; those cells are left empty."));
+    assert.ok(logger.lines.includes("WARNING Google Sheets: 'SET TRI' field 'target' not written: 'target' is a reserved column."));
+    assert.ok(logger.lines.includes("WARNING Google Sheets: no value for 'Empty' field(s) volume; those cells are left empty."));
+});
+
+test("placeRecord puts cells under their header names and adds missing names to the end", () => {
+    const record = new Map([["scraped_at", "now"], ["target", "Gold"], ["price", 1], ["new", "x"]]);
+    // Existing headers keep their places; a repeated name uses its first column.
+    assert.deepEqual(placeRecord(["target", "note", "price", "scraped_at", "price"], record), {
+        added: ["new"],
+        row: ["Gold", "", 1, "now", "", "x"],
+    });
+    assert.deepEqual(placeRecord([], record), { added: ["scraped_at", "target", "price", "new"], row: ["now", "Gold", 1, "x"] });
+});
+
+test("google_sheets checks: tab and columns per target (400 from the event, 500 from config), required fields (500)", () => {
+    const fails = (config, entries, targetsFromEvent, statusCode, message) => assert.throws(
+        () => routeOutputs(config, [target("Gold", entries)], undefined, { targetsFromEvent }),
+        (e) => e instanceof OutputError && e.statusCode === statusCode && e.message === message,
+    );
+    const at = "Target 'Gold', output 'sheets':";
+    const noTab = `${at} needs a 'tab', on the target's entry or on the output.`;
+    fails(WITH_SHEETS, [{ name: "sheets", colums: {} }], true, 400, `${at} unknown option(s) colums (google_sheets takes 'tab' and 'columns').`);
+    fails(WITH_SHEETS, [{ name: "sheets", tab: "" }], false, 500, `${at} 'tab' must be a non-empty string.`);
+    fails(WITH_SHEETS, [{ name: "sheets", columns: {} }], true, 400, `${at} 'columns' must map field names to column names.`);
+    fails(WITH_SHEETS, [{ name: "sheets", columns: { price: "target" } }], true, 400,
+        `${at} column 'target' is reserved (every row starts with scraped_at and target).`);
+    fails(WITH_SHEETS, [{ name: "sheets", columns: { buy: "price", sell: "price" } }], false, 500,
+        `${at} more than one field writes column 'price'.`);
+
+    const withoutTab = { outputs: { sheets: SHEETS_NO_TAB } };
+    fails(withoutTab, ["sheets"], false, 500, noTab);
+    fails(withoutTab, [{ name: "sheets", columns: { price: "price" } }], true, 400, noTab);
+    assert.deepEqual(
+        routeOutputs(withoutTab, [target("Gold", [{ name: "sheets", tab: "gold" }])], undefined).get("Gold"),
+        [["sheets", SHEETS_NO_TAB, { tab: "gold" }]],
+    );
+
+    const badDefinition = (definition, message) => fails(
+        { outputs: { sheets: { ...SHEETS, ...definition } } }, ["sheets"], true, 500, `Output 'sheets' (google_sheets) ${message}`,
+    );
+    badDefinition({ spreadsheet_id: undefined }, "needs a 'spreadsheet_id'.");
+    badDefinition({ client_email: "" }, "needs a 'client_email'.");
+    badDefinition({ private_key: 42 }, "needs a 'private_key'.");
+    badDefinition({ tab: "" }, "'tab' must be a non-empty string.");
+});
+
+test("lambda handler rejects a google_sheets route without a tab: 400 from the event, 500 from config", async (t) => {
+    const calls = stubFetch(t, () => new Response("{}"));
+    const outputs = { sheets: SHEETS_NO_TAB };
+    const error = "Target 'Gold', output 'sheets': needs a 'tab', on the target's entry or on the output.";
+    const fromEvent = await call(t, JSON.stringify({ outputs, targets: [] }), { targets: [target("Gold", ["sheets"])] });
+    assert.equal(fromEvent.status, 400);
+    assert.equal(fromEvent.body.error, error);
+    const fromConfig = await call(t, JSON.stringify({ outputs, targets: [target("Gold", ["sheets"])] }), {});
+    assert.equal(fromConfig.status, 500);
+    assert.equal(fromConfig.body.error, error);
+    assert.equal(calls.length, 0);
+});
+
+test("a google_sheets output appends one row per target, placed under row 1's names", async (t) => {
+    const calls = stubGoogle(t, { prices: ["target", "scraped_at", "", "BANK TRI"], [THAI_TAB]: [], other: ["x"] });
+    const columns = { "วันที่": "date", "ทองคำแท่ง รับซื้อ": "bar_buy", "ทองคำแท่ง ขายออก": "bar_sell" };
+    const config = { outputs: { sheets: sheetsOutput("append", { private_key: ESCAPED_PEM }) } };
+    const routes = routeOutputs(config, [
+        target("Gold", [{ name: "sheets", tab: THAI_TAB, columns }]),
+        target("SET TRI", ["sheets"]),
+        target("Debug"),
+    ], undefined);
+    const logger = recordingLogger();
+    await sendOutputs(routes, [
+        result("Gold", "วันที่", "18 ต.ค. 2569"),
+        result("Gold", "ทองคำแท่ง รับซื้อ", "65,900.00"),
+        result("Gold", "ทองคำแท่ง ขายออก", "66,100.00"),
+        result("Gold", "เปลี่ยนแปลงวันนี้", "+50"),
+        result("SET TRI", "BANK TRI", "1,234.56"),
+        result("SET TRI", "HELTH TRI", "987.65"),
+        result("SET TRI", "code", "007"),
+        result("Debug", "probe"),
+    ], logger);
+
+    const thai = `'${THAI_TAB}'`;
+    assert.deepEqual(sheetsRequests(calls), [
+        ["GET", "?fields=sheets.properties.title"],
+        // Row 1 of the Thai tab is empty, so the header is written first.
+        ["GET", `/values/${thai}!1:1`],
+        ["PUT", `/values/${thai}!A1:E1?valueInputOption=RAW`, { values: [["scraped_at", "target", "date", "bar_buy", "bar_sell"]] }],
+        ["POST", `/values/${thai}!A1:append?${APPEND}`, { values: [["<now>", "Gold", "18 ต.ค. 2569", 65900, 66100]] }],
+        // 'prices' has a header: values go under their names, and new names are added to its end.
+        ["GET", "/values/'prices'!1:1"],
+        ["PUT", "/values/'prices'!E1:F1?valueInputOption=RAW", { values: [["HELTH TRI", "code"]] }],
+        ["POST", `/values/'prices'!A1:append?${APPEND}`, { values: [["SET TRI", "<now>", "", 1234.56, 987.65, "007"]] }],
+    ]);
+
+    // The range is quoted, then URL-encoded: no raw spaces or Thai in the URL.
+    const append = calls.find(({ url }) => url.includes(":append") && !url.includes("prices"));
+    assert.match(append.url, /^[\x21-\x7e]+$/);
+    assert.ok(append.url.endsWith(`%20(%E0%B8%9A%E0%B8%B2%E0%B8%97)'!A1:append?${APPEND}`), append.url);
+    for (const { url, init } of calls.filter((c) => c.url.startsWith(SHEET_URL))) {
+        assert.equal(init.headers.authorization, "Bearer ya29.test-token-1", url);
+        if (init.body !== undefined) assert.equal(init.headers["content-type"], "application/json", url);
+    }
+    assert.equal(calls.filter(({ url }) => url === TOKEN_URL).length, 1);
+    assert.ok(logger.lines.includes("INFO Appended 2 row(s) to Google Sheet sheet-123."));
+});
+
+test("the access token is reused across sends, and dropped after a 401", async (t) => {
+    let unauthorized = false;
+    const calls = stubGoogle(t, { prices: ["scraped_at", "target", "price"] }, (url) => (
+        unauthorized && url.endsWith("?fields=sheets.properties.title")
+            ? json({ error: { code: 401, message: "Request had invalid authentication credentials.", status: "UNAUTHENTICATED" } }, 401)
+            : null));
+    const routes = routeOutputs({ outputs: { sheets: sheetsOutput("reuse") } }, [target("Gold", ["sheets"])], undefined);
+    const logger = recordingLogger();
+    const send = () => sendOutputs(routes, [result("Gold", "price", "100")], logger);
+
+    await send();
+    await send();
+    unauthorized = true;
+    await send();
+    unauthorized = false;
+    await send();
+
+    assert.equal(calls.filter(({ url }) => url === TOKEN_URL).length, 2);
+    const bearers = calls.filter(({ url }) => url.startsWith(SHEET_URL)).map(({ init }) => init.headers.authorization);
+    assert.deepEqual([...new Set(bearers)], ["Bearer ya29.test-token-1", "Bearer ya29.test-token-2"]);
+    assert.ok(logger.lines.includes(
+        "ERROR Failed to read Google Sheet sheet-123: UNAUTHENTICATED: Request had invalid authentication credentials.",
+    ));
+    assert.equal(logger.lines.filter((l) => l === "INFO Appended 1 row(s) to Google Sheet sheet-123.").length, 3);
+});
+
+test("one failing target is logged and the next is still appended; a missing tab is reported, not created", async (t) => {
+    const calls = stubGoogle(t, { prices: ["scraped_at", "target", "price"], locked: [] }, (url, init) => (
+        init.method === "PUT" && url.includes("locked")
+            ? json({ error: { code: 403, message: "You are trying to edit a protected cell or object.", status: "PERMISSION_DENIED" } }, 403)
+            : null));
+    const routes = routeOutputs({ outputs: { sheets: sheetsOutput("failures") } }, [
+        target("Locked", [{ name: "sheets", tab: "locked" }]),
+        target("Gone", [{ name: "sheets", tab: "gold" }]),
+        target("Gold", ["sheets"]),
+    ], undefined);
+    const logger = recordingLogger();
+    await sendOutputs(routes, [result("Locked", "price"), result("Gone", "price"), result("Gold", "price")], logger);
+
+    assert.ok(logger.lines.includes(
+        "ERROR Failed to append 'Locked' to Google Sheet sheet-123: PERMISSION_DENIED: You are trying to edit a protected cell or object.",
+    ));
+    assert.ok(logger.lines.includes(
+        "ERROR Failed to append 'Gone' to Google Sheet sheet-123: tab 'gold' doesn't exist (tabs: prices, locked). Create it first.",
+    ));
+    assert.ok(logger.lines.includes("INFO Appended 1 row(s) to Google Sheet sheet-123."));
+    // Only the 'prices' row is appended, and nothing else is posted (no tab is created).
+    const posts = sheetsRequests(calls).filter(([method]) => method === "POST");
+    assert.deepEqual(posts.map(([, rest]) => rest), [`/values/'prices'!A1:append?${APPEND}`]);
+});
+
+test("Google errors are readable, with a sharing hint, and no log line carries a secret", async (t) => {
+    let tokenRefused = true;
+    let shared = false;
+    const calls = stubGoogle(t, { prices: [] }, (url) => {
+        if (url === TOKEN_URL && tokenRefused) return json({ error: "invalid_grant", error_description: "Invalid JWT Signature." }, 400);
+        if (url.endsWith("?fields=sheets.properties.title") && !shared) {
+            return json({ error: { code: 403, message: "The caller does not have permission", status: "PERMISSION_DENIED" } }, 403);
+        }
+        return null;
+    });
+    const output = sheetsOutput("secrets", { private_key: ESCAPED_PEM });
+    const routes = routeOutputs({ outputs: { sheets: output } }, [target("Gold", ["sheets"])], undefined);
+    const logger = recordingLogger();
+    const send = () => sendOutputs(routes, [result("Gold", "price", "100")], logger);
+
+    await send();
+    tokenRefused = false;
+    await send();
+    shared = true;
+    await send();
+
+    assert.ok(logger.lines.includes(
+        "ERROR Failed to read Google Sheet sheet-123: Google token request failed: invalid_grant: Invalid JWT Signature.",
+    ));
+    assert.ok(logger.lines.includes(
+        "ERROR Failed to read Google Sheet sheet-123: PERMISSION_DENIED: The caller does not have permission "
+        + `(is the sheet shared with ${output.client_email}?)`,
+    ));
+    assert.ok(logger.lines.includes("INFO Appended 1 row(s) to Google Sheet sheet-123."));
+
+    const jwts = calls.filter(({ url }) => url === TOKEN_URL).map(({ init }) => new URLSearchParams(init.body).get("assertion"));
+    assert.equal(jwts.length, 2);
+    const secrets = ["PRIVATE KEY", PRIVATE_PEM.split("\n")[1], ...jwts, "ya29."];
+    for (const line of logger.lines) {
+        for (const secret of secrets) assert.ok(!line.includes(secret), `secret in log line: ${line}`);
+    }
 });
 
 // ---- Hardening ----
