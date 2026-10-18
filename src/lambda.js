@@ -1,10 +1,10 @@
+import { setAwsRegion } from "./aws.js";
 import { loadConfig } from "./config.js";
 import { apiKeyMatches, getHeader, isHttpEvent, looksLikeHttpRequest, parseJsonBody } from "./http.js";
 import { getLogger } from "./logger.js";
 import { OutputError, describeRoutes, routeOutputs, sendOutputs } from "./outputs.js";
 import { resolveValue } from "./resolve.js";
 import { runAll } from "./scraper.js";
-import { setSecretsRegion } from "./secrets.js";
 import { toBool } from "./util.js";
 
 const logger = getLogger("Scraper");
@@ -58,7 +58,7 @@ export async function handler(event) {
             return reject(500, "Configuration not found. Please set CONFIG_JSON env var or provide a config file.");
         }
 
-        setSecretsRegion(config.region);
+        setAwsRegion(config.region);
 
         let request = event ?? {};
         let targetsFromEvent = false;

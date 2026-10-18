@@ -1,9 +1,9 @@
 // Local entry point:  CONFIG_FILE=examples/get-xpath.json npm start
+import { setAwsRegion } from "./aws.js";
 import { loadConfig } from "./config.js";
 import { getLogger } from "./logger.js";
 import { describeRoutes, routeOutputs, sendOutputs } from "./outputs.js";
 import { runAll } from "./scraper.js";
-import { setSecretsRegion } from "./secrets.js";
 
 const logger = getLogger("Scraper");
 
@@ -22,7 +22,7 @@ async function main() {
         return 1;
     }
 
-    setSecretsRegion(config.region);
+    setAwsRegion(config.region);
 
     const targets = config.targets;
     if (!Array.isArray(targets) || targets.length === 0) {
