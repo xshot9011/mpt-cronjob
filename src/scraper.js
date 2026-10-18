@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { executeActions } from "./actions.js";
 import { humanizeMouse, launchContext } from "./browser.js";
 import { getLogger } from "./logger.js";
-import { isLambda, sleep, toBool } from "./util.js";
+import { isLambda, sleep, targetName, toBool } from "./util.js";
 
 const logger = getLogger("Scraper");
 
@@ -15,7 +15,7 @@ export function normalizeUrl(url) {
 
 /**
  * Open one target and run its actions. Returns the extracted items as
- * { name, value, options }; never throws.
+ * { name, value, options, target } (target = the target's name); never throws.
  */
 export async function scrapeTarget(page, name, url, actions, waitTimeout, actionWait) {
     const targetLogger = getLogger(name);
@@ -54,10 +54,10 @@ export async function scrapeTarget(page, name, url, actions, waitTimeout, action
         return results.map(({ name: field, value, options }) => {
             if (field) {
                 targetLogger.info(`Extraction successful: ${name}. ${field}: ${value}`);
-                return { name: `${name} - ${field}`, value, options };
+                return { name: `${name} - ${field}`, value, options, target: name };
             }
             targetLogger.info(`Extraction successful: ${name}. Value: ${value}`);
-            return { name, value, options };
+            return { name, value, options, target: name };
         });
     } catch (e) {
         targetLogger.error(`An unexpected error occurred: ${e.message}`);
@@ -83,7 +83,7 @@ export async function runAll(config) {
     try {
         const page = await context.newPage();
         for (const target of targets) {
-            const name = target.name ?? "UnnamedTarget";
+            const name = targetName(target);
             const actions = Array.isArray(target.actions) ? target.actions : [];
             if (target.url && actions.length > 0) {
                 allResults.push(...await scrapeTarget(page, name, target.url, actions, waitTimeout, actionWait));

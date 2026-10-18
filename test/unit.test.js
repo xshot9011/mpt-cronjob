@@ -6,7 +6,7 @@ import { buildSwitchPathUrl } from "../src/actions.js";
 import { browserLaunchOptions } from "../src/browser.js";
 import { apiKeyMatches, isHttpEvent, looksLikeHttpRequest, parseJsonBody } from "../src/http.js";
 import { handler } from "../src/lambda.js";
-import { OutputError, SENDERS, configuredOutputs, selectOutputs, sendOutputs } from "../src/outputs.js";
+import { OutputError, SENDERS, configuredOutputs, describeRoutes, routeOutputs, sendOutputs } from "../src/outputs.js";
 import { parseDuration, resolveValue } from "../src/resolve.js";
 import { normalizeUrl } from "../src/scraper.js";
 import { getSecret, setSecretsRegion } from "../src/secrets.js";
@@ -277,9 +277,10 @@ test("scheduled events can use 'only' too", async (t) => {
 // ---- Outputs ----
 
 const TARGETS = [{ name: "Gold", url: "https://example.com", actions: [{ type: "get", xpath: "//h1" }] }];
-const RESULTS = [{ name: "Gold - price", value: "100", options: [] }];
 const tg = (id) => ({ type: "telegram", bot_token: `string['bot-${id}']`, chat_id: `string['chat-${id}']` });
 const TWO_OUTPUTS = { outputs: { telegram: tg("a"), "telegram-alert": tg("b") } };
+const target = (name, outputs) => ({ name, url: "https://example.com", actions: [], ...(outputs === undefined ? {} : { outputs }) });
+const result = (targetName, field) => ({ name: `${targetName} - ${field}`, value: "1", options: [], target: targetName });
 
 /** A logger that records every line as "<LEVEL> <message>". */
 function recordingLogger() {
@@ -302,6 +303,9 @@ function captureConsole(t) {
 /** Bot tokens of the Telegram messages sent through a stubbed fetch. */
 const sentBots = (calls) => calls.map(({ url }) => /\/bot([^/]+)\/sendMessage$/.exec(url)?.[1]);
 
+/** routeOutputs' result as { target: [output names] }. */
+const routeNames = (routes) => Object.fromEntries([...routes].map(([name, routed]) => [name, routed.map(([n]) => n)]));
+
 test("legacy telegram_* keys become one 'telegram' output", (t) => {
     withEnv(t, { TELEGRAM_BOT_TOKEN: undefined, TELEGRAM_CHAT_ID: undefined });
     assert.deepEqual(configuredOutputs({ telegram_bot_token: "tok", telegram_chat_id: "chat" }), {
@@ -318,39 +322,83 @@ test("the legacy Telegram output falls back to the TELEGRAM_* env vars; config '
     assert.deepEqual(configuredOutputs({ outputs: {}, telegram_bot_token: "tok", telegram_chat_id: "chat" }), {});
 });
 
-test("selectOutputs: no names = all, [] = none, names = just those", () => {
-    assert.deepEqual(selectOutputs(TWO_OUTPUTS, undefined).map(([name]) => name), ["telegram", "telegram-alert"]);
-    assert.deepEqual(selectOutputs(TWO_OUTPUTS, []), []);
-    assert.deepEqual(selectOutputs(TWO_OUTPUTS, ["telegram-alert", "telegram-alert"]), [["telegram-alert", tg("b")]]);
+test("routeOutputs: a target sends to the outputs it names, and nowhere when it names none", () => {
+    const routes = routeOutputs(TWO_OUTPUTS, [
+        target("SET TRI", ["telegram", "telegram-alert", "telegram"]),
+        target("Gold", ["telegram-alert"]),
+        target("Debug"),
+        target("Quiet", []),
+        target("Unset", null),
+    ], undefined);
+    assert.deepEqual(routeNames(routes), {
+        "SET TRI": ["telegram", "telegram-alert"],
+        Gold: ["telegram-alert"],
+        Debug: [],
+        Quiet: [],
+        Unset: [],
+    });
+    assert.equal(
+        describeRoutes(routes),
+        "SET TRI -> telegram, telegram-alert; Gold -> telegram-alert; Debug -> none (log only); "
+        + "Quiet -> none (log only); Unset -> none (log only)",
+    );
 });
 
-test("selectOutputs rejects bad names with 400 and a bad config with 500", () => {
-    const fails = (config, names, statusCode, message) => assert.throws(
-        () => selectOutputs(config, names),
+test("routeOutputs: the event's outputs limit the run; [] sends nothing", () => {
+    const targets = [target("SET TRI", ["telegram", "telegram-alert"]), target("Gold", ["telegram"])];
+    assert.deepEqual(routeNames(routeOutputs(TWO_OUTPUTS, targets, ["telegram-alert"])), { "SET TRI": ["telegram-alert"], Gold: [] });
+    assert.deepEqual(routeNames(routeOutputs(TWO_OUTPUTS, targets, [])), { "SET TRI": [], Gold: [] });
+});
+
+test("routeOutputs: targets that share a name share their outputs", () => {
+    const targets = [target("Gold", ["telegram"]), target("Gold", ["telegram-alert"])];
+    assert.deepEqual(routeNames(routeOutputs(TWO_OUTPUTS, targets, undefined)), { Gold: ["telegram", "telegram-alert"] });
+});
+
+test("routeOutputs rejects bad names: 400 when the event sent them, 500 when the config has them", () => {
+    const fails = (config, targets, runNames, options, statusCode, message) => assert.throws(
+        () => routeOutputs(config, targets, runNames, options),
         (e) => e instanceof OutputError && e.statusCode === statusCode && message.test(e.message),
     );
-    fails(TWO_OUTPUTS, ["nope"], 400, /^Unknown output name\(s\): nope$/);
-    fails(TWO_OUTPUTS, ["toString"], 400, /^Unknown output name\(s\): toString$/);
-    fails(TWO_OUTPUTS, "telegram", 400, /must be a list/);
-    fails(TWO_OUTPUTS, [42], 400, /must be a list/);
-    fails({ outputs: { x: { type: "pigeon" } } }, undefined, 500, /^Output 'x' has unknown type 'pigeon'/);
-    fails({ outputs: { x: "telegram" } }, [], 500, /^Output 'x' has unknown type/);
-    fails({ outputs: [tg("a")] }, undefined, 500, /must be an object/);
+    const ok = [target("Gold", ["telegram"])];
+    fails(TWO_OUTPUTS, ok, ["nope"], {}, 400, /^Unknown output name\(s\): nope$/);
+    fails(TWO_OUTPUTS, ok, ["toString"], {}, 400, /^Unknown output name\(s\): toString$/);
+    fails(TWO_OUTPUTS, ok, "telegram", {}, 400, /^'outputs' must be a list/);
+    fails(TWO_OUTPUTS, ok, [42], {}, 400, /^'outputs' must be a list/);
+    fails(TWO_OUTPUTS, [target("Gold", ["nope"])], undefined, { targetsFromEvent: true }, 400, /^Target 'Gold': unknown output name\(s\): nope$/);
+    fails(TWO_OUTPUTS, [target("Gold", ["nope"])], undefined, {}, 500, /^Target 'Gold': unknown output name\(s\): nope$/);
+    fails(TWO_OUTPUTS, [target("Gold", "telegram")], undefined, { targetsFromEvent: true }, 400, /^Target 'Gold': 'outputs' must be a list/);
+    fails(TWO_OUTPUTS, [null], undefined, { targetsFromEvent: true }, 400, /^Target #1 must be an object/);
+    fails({ outputs: { x: { type: "pigeon" } } }, ok, undefined, {}, 500, /^Output 'x' has unknown type 'pigeon'/);
+    fails({ outputs: { x: "telegram" } }, ok, [], {}, 500, /^Output 'x' has unknown type/);
+    fails({ outputs: [tg("a")] }, ok, undefined, {}, 500, /must be an object/);
 });
 
-test("sendOutputs sends only to the selected outputs and logs each one", async (t) => {
+test("sendOutputs sends each output one message with the results routed to it", async (t) => {
     const calls = stubFetch(t, () => new Response("{}"));
     const logger = recordingLogger();
-    await sendOutputs(selectOutputs(TWO_OUTPUTS, ["telegram-alert"]), RESULTS, logger);
-    assert.deepEqual(sentBots(calls), ["bot-b"]);
-    assert.equal(JSON.parse(calls[0].init.body).chat_id, "chat-b");
+    const routes = routeOutputs(TWO_OUTPUTS, [
+        target("SET TRI", ["telegram"]),
+        target("Gold", ["telegram", "telegram-alert"]),
+        target("Debug"),
+    ], undefined);
+    await sendOutputs(routes, [result("SET TRI", "BANK TRI"), result("Gold", "price"), result("Debug", "probe")], logger);
+
+    assert.deepEqual(sentBots(calls), ["bot-a", "bot-b"]);
+    const [main, alert] = calls.map(({ init }) => JSON.parse(init.body));
+    assert.equal(main.text, "SET TRI - BANK TRI\n<pre>1</pre>\nGold - price\n<pre>1</pre>");
+    assert.equal(alert.text, "Gold - price\n<pre>1</pre>");
+    assert.equal(alert.chat_id, "chat-b");
+    assert.ok(logger.lines.includes("INFO Sending results to output 'telegram' (telegram)"));
     assert.ok(logger.lines.includes("INFO Sending results to output 'telegram-alert' (telegram)"));
 });
 
-test("sendOutputs sends nothing for [] or for empty results", async (t) => {
+test("sendOutputs sends nothing for log-only targets, for [] or for empty results", async (t) => {
     const calls = stubFetch(t, () => new Response("{}"));
-    await sendOutputs(selectOutputs(TWO_OUTPUTS, []), RESULTS, silent);
-    await sendOutputs(selectOutputs(TWO_OUTPUTS, undefined), [], silent);
+    const targets = [target("Gold", ["telegram"]), target("Debug")];
+    await sendOutputs(routeOutputs(TWO_OUTPUTS, targets, undefined), [result("Debug", "probe")], silent);
+    await sendOutputs(routeOutputs(TWO_OUTPUTS, targets, []), [result("Gold", "price")], silent);
+    await sendOutputs(routeOutputs(TWO_OUTPUTS, targets, undefined), [], silent);
     assert.equal(calls.length, 0);
 });
 
@@ -359,7 +407,8 @@ test("one failing Telegram output doesn't stop the next", async (t) => {
         ? new Response("Bad Request: chat not found", { status: 400 })
         : new Response("{}")));
     const logger = recordingLogger();
-    await sendOutputs(selectOutputs(TWO_OUTPUTS, undefined), RESULTS, logger);
+    const routes = routeOutputs(TWO_OUTPUTS, [target("Gold", ["telegram", "telegram-alert"])], undefined);
+    await sendOutputs(routes, [result("Gold", "price")], logger);
     assert.deepEqual(sentBots(calls), ["bot-a", "bot-b"]);
     assert.ok(logger.lines.includes("ERROR Failed to send Telegram message: Bad Request: chat not found"));
     assert.ok(logger.lines.includes("INFO Successfully sent Telegram message."));
@@ -370,7 +419,8 @@ test("a sender that throws is logged and the next output still runs", async (t) 
     t.after(() => { delete SENDERS.broken; });
     const calls = stubFetch(t, () => new Response("{}"));
     const logger = recordingLogger();
-    await sendOutputs(selectOutputs({ outputs: { first: { type: "broken" }, second: tg("b") } }, undefined), RESULTS, logger);
+    const config = { outputs: { first: { type: "broken" }, second: tg("b") } };
+    await sendOutputs(routeOutputs(config, [target("Gold", ["first", "second"])], undefined), [result("Gold", "price")], logger);
     assert.deepEqual(sentBots(calls), ["bot-b"]);
     assert.ok(logger.lines.includes("ERROR Output 'first' failed: boom"));
 });
@@ -378,7 +428,8 @@ test("a sender that throws is logged and the next output still runs", async (t) 
 test("a Telegram output whose chat_id resolves empty logs a warning", async (t) => {
     const calls = stubFetch(t, () => new Response("{}"));
     const logger = recordingLogger();
-    await sendOutputs([["telegram", { type: "telegram", bot_token: "string['tok']", chat_id: "" }]], RESULTS, logger);
+    const config = { outputs: { telegram: { type: "telegram", bot_token: "string['tok']", chat_id: "" } } };
+    await sendOutputs(routeOutputs(config, [target("Gold", ["telegram"])], undefined), [result("Gold", "price")], logger);
     assert.equal(calls.length, 0);
     assert.ok(logger.lines.includes("WARNING Telegram message not sent: chat_id is empty or could not be resolved."));
 });
@@ -395,6 +446,18 @@ test("lambda handler rejects bad 'outputs' before scraping", async (t) => {
         assert.equal(status, 400);
         assert.equal(body.error, error);
     }
+    assert.equal(calls.length, 0);
+});
+
+test("lambda handler rejects unknown output names in event targets (400) and config targets (500)", async (t) => {
+    const calls = stubFetch(t, () => new Response("{}"));
+    const fromEvent = await call(t, JSON.stringify({ ...TWO_OUTPUTS, targets: [] }), { targets: [target("Gold", ["nope"])] });
+    assert.equal(fromEvent.status, 400);
+    assert.equal(fromEvent.body.error, "Target 'Gold': unknown output name(s): nope");
+
+    const fromConfig = await call(t, JSON.stringify({ ...TWO_OUTPUTS, targets: [target("Gold", ["nope"])] }), {});
+    assert.equal(fromConfig.status, 500);
+    assert.equal(fromConfig.body.error, "Target 'Gold': unknown output name(s): nope");
     assert.equal(calls.length, 0);
 });
 
@@ -431,6 +494,7 @@ test("every refused invocation writes a log line", async (t) => {
         [API_CONFIG, httpEvent({ key: "wrong" }), 401],
         [config, { body: JSON.stringify({ targets: TARGETS }) }, 400],
         [API_CONFIG, { targets: TARGETS }, 400],
+        [JSON.stringify({ ...TWO_OUTPUTS, targets: [] }), { targets: [target("Gold", ["nope"])] }, 400],
     ];
     for (const [cfg, event, expected] of cases) {
         lines.length = 0;

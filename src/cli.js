@@ -1,7 +1,7 @@
 // Local entry point:  CONFIG_FILE=examples/get-xpath.json npm start
 import { loadConfig } from "./config.js";
 import { getLogger } from "./logger.js";
-import { selectOutputs, sendOutputs } from "./outputs.js";
+import { describeRoutes, routeOutputs, sendOutputs } from "./outputs.js";
 import { runAll } from "./scraper.js";
 import { setSecretsRegion } from "./secrets.js";
 
@@ -30,20 +30,20 @@ async function main() {
         return 1;
     }
 
-    // Local runs send to every configured output.
-    let outputs;
+    let routes;
     try {
-        outputs = selectOutputs(config, undefined);
+        routes = routeOutputs(config, targets, undefined);
     } catch (e) {
         logger.error(`Invalid config: ${e.message}`);
         return 1;
     }
 
     logger.info(`Starting scraping process for ${targets.length} targets.`);
+    logger.info(`Outputs: ${describeRoutes(routes)}.`);
     const results = await runAll(config);
     logger.info("All scraping tasks processed.");
 
-    await sendOutputs(outputs, results, logger);
+    await sendOutputs(routes, results, logger);
     return 0;
 }
 

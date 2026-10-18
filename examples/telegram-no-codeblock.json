@@ -9,6 +9,7 @@
     "targets": [
         {
             "name": "Formatted Telegram message",
+            "outputs": ["telegram"],
             "url": "https://example.com",
             "actions": [
                 {

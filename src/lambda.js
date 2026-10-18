@@ -1,7 +1,7 @@
 import { loadConfig } from "./config.js";
 import { apiKeyMatches, getHeader, isHttpEvent, looksLikeHttpRequest, parseJsonBody } from "./http.js";
 import { getLogger } from "./logger.js";
-import { OutputError, selectOutputs, sendOutputs } from "./outputs.js";
+import { OutputError, describeRoutes, routeOutputs, sendOutputs } from "./outputs.js";
 import { resolveValue } from "./resolve.js";
 import { runAll } from "./scraper.js";
 import { setSecretsRegion } from "./secrets.js";
@@ -40,8 +40,9 @@ function reject(statusCode, error) {
  *    The scraped values are returned.
  *
  * `only` is a list of configured target names to run instead of all of them.
- * `outputs` is a list of configured output names to send the results to;
- * without it every configured output gets them, and [] sends nowhere.
+ * Each target sends its results to the configured outputs named in its own
+ * `outputs` (none named = log only). The event's `outputs` limits a run to
+ * those output names; [] sends nowhere.
  * Request-style events that are neither shape above are refused.
  * Every refused invocation is logged before it returns.
  */
@@ -60,6 +61,7 @@ export async function handler(event) {
         setSecretsRegion(config.region);
 
         let request = event ?? {};
+        let targetsFromEvent = false;
         if (http) {
             // Fail closed: without a configured key, nothing is reachable over HTTP.
             const expectedKey = await resolveValue(config.http_api_key, logger);
@@ -84,6 +86,7 @@ export async function handler(event) {
                 + "allow_event_targets is false); send 'only' with configured target names.");
         } else if (Array.isArray(request.targets) && request.targets.length > 0) {
             config.targets = request.targets;
+            targetsFromEvent = true;
         }
 
         if (request.only !== undefined) {
@@ -97,9 +100,14 @@ export async function handler(event) {
             config.targets = configured.filter((t) => names.includes(t.name));
         }
 
-        let outputs;
+        const targets = config.targets;
+        if (!Array.isArray(targets) || targets.length === 0) {
+            return reject(400, "No targets configured.");
+        }
+
+        let routes;
         try {
-            outputs = selectOutputs(config, request.outputs);
+            routes = routeOutputs(config, targets, request.outputs, { targetsFromEvent });
         } catch (e) {
             if (!(e instanceof OutputError)) throw e;
             if (e.statusCode === 400) return reject(400, e.message);
@@ -107,16 +115,11 @@ export async function handler(event) {
             return reply(500, { error: http ? "Internal error." : e.message });
         }
 
-        const targets = config.targets;
-        if (!Array.isArray(targets) || targets.length === 0) {
-            return reject(400, "No targets configured.");
-        }
-
-        const outputNames = outputs.map(([name]) => name).join(", ") || "none";
-        logger.info(`Starting Lambda scraping for ${targets.length} targets${http ? " (HTTP request)" : ""}; outputs: ${outputNames}.`);
+        logger.info(`Starting Lambda scraping for ${targets.length} targets${http ? " (HTTP request)" : ""}.`);
+        logger.info(`Outputs: ${describeRoutes(routes)}.`);
         const results = await runAll(config);
 
-        await sendOutputs(outputs, results, logger);
+        await sendOutputs(routes, results, logger);
 
         if (http) {
             return reply(200, { results: results.map(({ name, value }) => ({ name, value })) });
