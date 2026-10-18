@@ -1,9 +1,10 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { executeActions } from "./actions.js";
-import { humanizeMouse, launchContext } from "./browser.js";
+import { humanizeMouse, launchContext, newContext } from "./browser.js";
+import { passChallenge } from "./challenge.js";
 import { getLogger } from "./logger.js";
-import { isLambda, sleep, targetName, toBool } from "./util.js";
+import { isLambda, randomInt, sleep, targetName, toBool } from "./util.js";
 
 const logger = getLogger("Scraper");
 
@@ -14,15 +15,21 @@ export function normalizeUrl(url) {
 }
 
 /**
- * Open one target and run its actions. Returns the extracted items as
- * { name, value, options, target, field? } (target = the target's name, field =
- * the `get` action's name when it has one); never throws.
+ * Open one target and run its actions. Returns { results, blocked }: results
+ * are the extracted items as { name, value, options, target, field? } (target =
+ * the target's name, field = the `get` action's name when it has one), and
+ * blocked is true when a Cloudflare challenge never cleared, in which case no
+ * action ran. Never throws.
  */
-export async function scrapeTarget(page, name, url, actions, waitTimeout, actionWait) {
+export async function scrapeTarget(page, name, url, actions, { waitTimeout, actionWait, challengeTimeout }) {
     const targetLogger = getLogger(name);
     try {
         targetLogger.info(`Initiating extraction from ${url}`);
-        await page.goto(normalizeUrl(url), { waitUntil: "domcontentloaded", timeout: 60_000 });
+        const response = await page.goto(normalizeUrl(url), { waitUntil: "domcontentloaded", timeout: 60_000 });
+        if (!(await passChallenge(page, response, challengeTimeout, targetLogger))) {
+            targetLogger.error(`Blocked by a Cloudflare challenge that did not clear within ${challengeTimeout}s.`);
+            return { results: [], blocked: true };
+        }
         targetLogger.info("Page opened, performing initial random mouse movement...");
         await humanizeMouse(page, 2);
 
@@ -45,24 +52,27 @@ export async function scrapeTarget(page, name, url, actions, waitTimeout, action
             targetLogger.warning("Invalid actions: Must contain at least one action of type 'get'.");
         }
 
-        const results = (await executeActions(page, targetLogger, actions, actionWait))
+        const results = (await executeActions(page, targetLogger, actions, actionWait, challengeTimeout))
             .filter((r) => r !== null);
         if (results.length === 0) {
             targetLogger.error(`Extraction failed: ${name}.`);
-            return [];
+            return { results: [], blocked: false };
         }
 
-        return results.map(({ name: field, value, options }) => {
-            if (field) {
-                targetLogger.info(`Extraction successful: ${name}. ${field}: ${value}`);
-                return { name: `${name} - ${field}`, value, options, target: name, field };
-            }
-            targetLogger.info(`Extraction successful: ${name}. Value: ${value}`);
-            return { name, value, options, target: name };
-        });
+        return {
+            blocked: false,
+            results: results.map(({ name: field, value, options }) => {
+                if (field) {
+                    targetLogger.info(`Extraction successful: ${name}. ${field}: ${value}`);
+                    return { name: `${name} - ${field}`, value, options, target: name, field };
+                }
+                targetLogger.info(`Extraction successful: ${name}. Value: ${value}`);
+                return { name, value, options, target: name };
+            }),
+        };
     } catch (e) {
         targetLogger.error(`An unexpected error occurred: ${e.message}`);
-        return [];
+        return { results: [], blocked: false };
     }
 }
 
@@ -72,24 +82,45 @@ export async function scrapeTarget(page, name, url, actions, waitTimeout, action
  */
 export async function runAll(config) {
     const targets = config.targets ?? [];
-    const waitTimeout = Number(config.wait_timeout ?? 15);
-    const actionWait = Number(config.action_wait ?? 2);
+    const timing = {
+        waitTimeout: Number(config.wait_timeout ?? 15),
+        actionWait: Number(config.action_wait ?? 2),
+        challengeTimeout: Number(config.challenge_timeout ?? 15),
+    };
+    const challengeRetries = Math.max(0, Math.floor(Number(config.challenge_retries ?? 1)) || 0);
     // Keeping the browser open is only useful for a visible browser on your own
     // machine; the process then stays alive until you press Ctrl+C.
     const keepOpen = toBool(config.keep_browser_open) && !toBool(config.headless, true) && !isLambda();
     const storageState = config.storage_state;
 
     const allResults = [];
-    const { browser, context } = await launchContext(config, logger);
+    const launched = await launchContext(config, logger);
+    const { browser } = launched;
+    let { context } = launched;
     try {
-        const page = await context.newPage();
+        let page = await context.newPage();
         for (const target of targets) {
             const name = targetName(target);
             const actions = Array.isArray(target.actions) ? target.actions : [];
-            if (target.url && actions.length > 0) {
-                allResults.push(...await scrapeTarget(page, name, target.url, actions, waitTimeout, actionWait));
-            } else {
+            if (!target.url || actions.length === 0) {
                 logger.warning(`Skipping target '${name}': Missing URL or actions.`);
+                continue;
+            }
+            for (let attempt = 1; ; attempt++) {
+                const { results, blocked } = await scrapeTarget(page, name, target.url, actions, timing);
+                allResults.push(...results);
+                if (!blocked) break;
+                if (attempt > challengeRetries) {
+                    logger.error(`Giving up on '${name}': still blocked by Cloudflare after ${attempt} attempt(s).`);
+                    break;
+                }
+                // Challenges are partly random: retry with fresh cookies after a pause.
+                const pause = randomInt(2, 5);
+                logger.info(`Retrying '${name}' in a fresh browser context in ${pause}s...`);
+                await sleep(pause);
+                await context.close().catch(() => {});
+                context = await newContext(browser, config, logger);
+                page = await context.newPage();
             }
         }
     } finally {

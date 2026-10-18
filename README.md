@@ -12,12 +12,18 @@ A Playwright-based web scraper written in Node.js. It runs locally (macOS/Linux)
 - **Integrations**: AWS Secrets Manager, Telegram, DynamoDB, Google Sheets, CapSolver.
 
 > **Note on Cloudflare:** running headless from an AWS/Lambda datacenter IP is the
-> weakest position against Cloudflare's managed challenges. The scraper applies
-> best-effort stealth (init-script `navigator.webdriver` patches,
-> `--disable-blink-features=AutomationControlled`, realistic UA/locale/timezone,
-> human-like mouse movement). It also supports an optional residential `proxy` and a
-> persisted `storage_state` session (see Configuration). If challenges still
-> block you, a residential proxy or moving off Lambda are the next levers.
+> weakest position against Cloudflare's managed challenges. The scraper tries to
+> look like a normal browser rather than patch over tells: it runs the full
+> Chromium build in headless mode, keeps the browser's own User-Agent (with
+> `HeadlessChrome` changed to `Chrome`), sets
+> `--disable-blink-features=AutomationControlled`, and moves the mouse. When a
+> page opens on Cloudflare's "Just a moment..." challenge, it waits for the
+> challenge to clear (`challenge_timeout`), then retries in a fresh browser
+> context (`challenge_retries`). A target that stays blocked logs
+> `Blocked by a Cloudflare challenge` and skips its actions. It also supports an
+> optional residential `proxy` and a persisted `storage_state` session (see
+> Configuration). If challenges still block you, a residential proxy or moving
+> off Lambda are the next levers.
 
 ---
 
@@ -267,10 +273,13 @@ Some fields support dynamic values: the `fill` action's `value_from`, a Telegram
 | `region` | _(unset)_ | AWS region for Secrets Manager lookups and DynamoDB outputs. |
 | `http_api_key` | _(unset)_ | Required for HTTP requests (API Gateway / Function URL); compared against the `x-api-key` header. Supports `secret_manager[...]`. Without it, HTTP access is refused. |
 | `allow_event_targets` | `true`, or `false` when `http_api_key` is set | Whether a trusted invocation's event may carry `targets`. Off by default on HTTP-facing functions, so caller-supplied URLs and scripts can't get in through a misconfigured integration. Set it explicitly to override. |
+| `challenge_timeout` | `15` | Seconds to wait for a Cloudflare challenge to clear by itself after a page opens (also after `switch_path`). |
+| `challenge_retries` | `1` | How many more times to open a target in a fresh browser context when its challenge doesn't clear. `0` turns retries off. |
+| `headless_shell` | `false` | Headless runs use the full Chromium build. Set to `true` to use Playwright's lighter `chromium-headless-shell` instead, which is easier for sites to detect. |
 | `chromium_sandbox` | `true` | Local runs only: keep Chromium's sandbox on while visiting third-party sites. Set to `false` only on hosts where the sandbox can't start (some Linux setups). Always off on Lambda, which can't run it. |
 | `outputs` | _(unset)_ | Named destinations for results, e.g. `{ "telegram": { "type": "telegram", "bot_token": "...", "chat_id": "..." } }`. Each target names the ones it sends to in its own `outputs`. See [Outputs](#-outputs). |
 | `telegram_bot_token` / `telegram_chat_id` | _(unset)_ | **Legacy.** Used only when `outputs` is not set: together they define one output named `telegram`, which targets still have to name. They fall back to the `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars. |
-| `user_agent` | recent desktop Chrome UA | Override the browser User-Agent string. |
+| `user_agent` | the browser's own, with `HeadlessChrome` → `Chrome` | Override the browser User-Agent string. A UA for another OS or Chrome version than the browser's own disagrees with `navigator.platform` and the client hints, which Cloudflare checks. |
 | `locale` | `en-US` | Browser locale. |
 | `timezone_id` | `Asia/Bangkok` | Emulated timezone (match it to your proxy region). |
 | `viewport` | `{ "width": 1920, "height": 1080 }` | Browser viewport size. |

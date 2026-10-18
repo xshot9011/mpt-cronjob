@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Just a moment...</title>
+</head>
+<body>
+    <!-- Stands in for Cloudflare's challenge interstitial. With ?clear_after_ms=N
+         it "passes" after N ms by moving on to page.html, as the real one does. -->
+    <div id="challenge-running">Checking your browser...</div>
+    <script>
+        const clearAfter = Number(new URLSearchParams(location.search).get("clear_after_ms"));
+        if (clearAfter) setTimeout(() => location.replace("page.html"), clearAfter);
+    </script>
+</body>
+</html>

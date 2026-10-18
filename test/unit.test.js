@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { buildSwitchPathUrl } from "../src/actions.js";
 import { setAwsRegion } from "../src/aws.js";
-import { browserLaunchOptions } from "../src/browser.js";
+import { browserLaunchOptions, headfulUserAgent } from "../src/browser.js";
 import { buildDynamoItems, toDynamoNumber } from "../src/dynamodb.js";
 import { a1Range, accessToken, columnLetters, googleErrorMessage, serviceAccountJwt } from "../src/google.js";
 import { apiKeyMatches, isHttpEvent, looksLikeHttpRequest, parseJsonBody } from "../src/http.js";
@@ -1084,4 +1084,20 @@ test("browserLaunchOptions keeps the Chromium sandbox on locally and off on Lamb
     assert.equal(lambda.headless, true);
     assert.ok(lambda.args.includes("--no-sandbox"));
     assert.equal(lambda.env.HOME, "/tmp");
+});
+
+test("browserLaunchOptions runs the full Chromium build unless headless_shell is set", (t) => {
+    for (const lambdaName of [undefined, "mpt-staging-scraper-cronjob"]) {
+        withEnv(t, { AWS_LAMBDA_FUNCTION_NAME: lambdaName });
+        assert.equal(browserLaunchOptions({}).channel, "chromium");
+        assert.equal(browserLaunchOptions({ headless_shell: "true" }).channel, undefined);
+    }
+});
+
+test("headfulUserAgent swaps HeadlessChrome for Chrome and keeps the rest", () => {
+    assert.equal(
+        headfulUserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.0.0 Safari/537.36"),
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+    );
+    assert.equal(headfulUserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"), null);
 });

@@ -10,6 +10,7 @@ import { handler } from "../src/lambda.js";
 import { runAll } from "../src/scraper.js";
 
 const FIXTURE_URL = new URL("./fixtures/page.html", import.meta.url).href;
+const CHALLENGE_URL = new URL("./fixtures/challenge.html", import.meta.url).href;
 const browserMissing = !fs.existsSync(chromium.executablePath())
     && "Chromium is not installed: run `npm run browser:install`";
 
@@ -52,6 +53,39 @@ test("runAll runs every action type against a real page", { skip: browserMissing
         { name: "Fixture - no_codeblock", value: "Fixture", options: ["--no-codeblock"], target: "Fixture", field: "no_codeblock" },
         { name: "Fixture - after_soft_failure", value: "Fixture", options: [], target: "Fixture", field: "after_soft_failure" },
     ]);
+});
+
+test("runAll waits for a Cloudflare challenge to clear, then runs the actions", { skip: browserMissing, timeout: 60_000 }, async () => {
+    const results = await runAll({
+        headless: true,
+        wait_timeout: 0,
+        action_wait: 0,
+        challenge_timeout: 10,
+        targets: [{
+            name: "Challenged",
+            url: `${CHALLENGE_URL}?clear_after_ms=1500`,
+            actions: [{ type: "get", name: "h1", xpath: "//h1" }],
+        }],
+    });
+    assert.deepEqual(results, [{ name: "Challenged - h1", value: "Fixture", options: [], target: "Challenged", field: "h1" }]);
+});
+
+test("runAll gives up on a challenge that never clears without running its actions", { skip: browserMissing, timeout: 60_000 }, async () => {
+    const started = Date.now();
+    const results = await runAll({
+        headless: true,
+        wait_timeout: 0,
+        action_wait: 0,
+        challenge_timeout: 1,
+        challenge_retries: 1,
+        targets: [
+            // A get on the challenge page would wait out its 15s locator timeout.
+            { name: "Blocked", url: CHALLENGE_URL, actions: [{ type: "get", name: "h1", xpath: "//h1" }] },
+            { name: "Next", url: FIXTURE_URL, actions: [{ type: "get", name: "h1", xpath: "//h1" }] },
+        ],
+    });
+    assert.deepEqual(results, [{ name: "Next - h1", value: "Fixture", options: [], target: "Next", field: "h1" }]);
+    assert.ok(Date.now() - started < 15_000, "the blocked target's actions should not have run");
 });
 
 test("lambda handler uses event.targets over the configured ones", { skip: browserMissing, timeout: 60_000 }, async (t) => {
