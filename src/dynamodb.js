@@ -1,8 +1,6 @@
 import { awsJsonCall } from "./aws.js";
 import { resolveValue } from "./resolve.js";
-import { isPlainObject } from "./util.js";
-
-const isName = (v) => typeof v === "string" && v !== "";
+import { checkColumns, digitCount, isName, plainNumber } from "./util.js";
 
 /** The table's key attribute names: [partition key, sort key or null for none]. */
 function keyNames(output) {
@@ -29,30 +27,16 @@ export function checkDynamoRoute(options, output) {
     const unknown = Object.keys(rest);
     if (unknown.length > 0) return `unknown option(s) ${unknown.join(", ")} (dynamodb takes 'columns').`;
     if (columns === undefined) return null;
-    if (!isPlainObject(columns) || Object.keys(columns).length === 0 || !Object.values(columns).every(isName)) {
-        return "'columns' must map field names to column names.";
-    }
-    const keys = keyNames(output);
-    const seen = new Set();
-    for (const column of Object.values(columns)) {
-        if (keys.includes(column)) return `column '${column}' is one of the table's key attributes.`;
-        if (seen.has(column)) return `more than one field writes column '${column}'.`;
-        seen.add(column);
-    }
-    return null;
+    return checkColumns(columns, keyNames(output), "is one of the table's key attributes");
 }
-
-const NUMBER_RE = /^[+-]?(0|[1-9]\d{0,2}(,\d{3})+|[1-9]\d*)(\.\d+)?$/;
 
 /**
  * A scraped value as a DynamoDB number ("1,234.56" -> "1234.56"), or null when
  * it isn't a plain number ("17 Oct 2026", "1.2%", "007") and stays a string.
  */
 export function toDynamoNumber(value) {
-    const s = String(value).trim();
-    if (!NUMBER_RE.test(s)) return null;
-    const number = s.replace(/,/g, "").replace(/^\+/, "");
-    return number.replace(/\D/g, "").length <= 38 ? number : null; // DynamoDB keeps 38 digits
+    const number = plainNumber(value);
+    return number !== null && digitCount(number) <= 38 ? number : null; // DynamoDB keeps 38 digits
 }
 
 /**
