@@ -9,6 +9,7 @@
     "targets": [
         {
             "name": "Price check with Telegram alert",
+            "outputs": ["telegram"],
             "url": "https://example.com",
             "actions": [
                 {

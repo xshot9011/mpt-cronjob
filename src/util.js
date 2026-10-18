@@ -5,6 +5,9 @@ export const isLambda = () => Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
 /** Sleep for a number of seconds (fractions allowed). */
 export const sleep = (seconds) => delay(Math.max(0, Number(seconds) || 0) * 1000);
 
+/** A target's name, as used in results, logs, `only` and output routing. */
+export const targetName = (target) => target.name ?? "UnnamedTarget";
+
 /** Random integer in [min, max], both inclusive. */
 export const randomInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
