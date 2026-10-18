@@ -1,0 +1,80 @@
+{
+    "region": "ap-southeast-7",
+    "headless": true,
+    "wait_timeout": 5,
+    "action_wait": 2,
+    "outputs": {
+        "telegram": {
+            "type": "telegram",
+            "bot_token": "secret_manager['my-app-secrets']['TELEGRAM_BOT_TOKEN']",
+            "chat_id": "secret_manager['my-app-secrets']['TELEGRAM_CHAT_ID']"
+        },
+        "sheets": {
+            "type": "google_sheets",
+            "spreadsheet_id": "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+            "client_email": "mpt-scraper@my-project.iam.gserviceaccount.com",
+            "private_key": "secret_manager['my-app-secrets']['GOOGLE_PRIVATE_KEY']",
+            "tab": "prices"
+        }
+    },
+    "targets": [
+        {
+            "name": "ราคาทองคำ (สมาคมค้าทองคำ)",
+            "url": "https://xn--42cah7d0cxcvbbb9x.com/",
+            "outputs": [
+                "telegram",
+                {
+                    "name": "sheets",
+                    "tab": "gold",
+                    "columns": {
+                        "วันที่": "date",
+                        "เวลา": "time",
+                        "ทองคำแท่ง รับซื้อ": "bar_buy",
+                        "ทองคำแท่ง ขายออก": "bar_sell",
+                        "ทองรูปพรรณ รับซื้อ": "ornament_buy",
+                        "ทองรูปพรรณ ขายออก": "ornament_sell"
+                    }
+                }
+            ],
+            "actions": [
+                {
+                    "type": "get",
+                    "name": "วันที่",
+                    "xpath": "(//tr[td[contains(., 'ครั้งที่')]])[1]/td[1]",
+                    "telegram_message_options": ["--no-codeblock"]
+                },
+                {
+                    "type": "get",
+                    "name": "เวลา",
+                    "xpath": "(//tr[td[contains(., 'ครั้งที่')]])[1]/td[2]",
+                    "telegram_message_options": ["--no-codeblock"]
+                },
+                {
+                    "type": "get",
+                    "name": "ทองคำแท่ง รับซื้อ",
+                    "xpath": "(//tr[td[normalize-space()='ทองคำแท่ง']])[1]/td[2]"
+                },
+                {
+                    "type": "get",
+                    "name": "ทองคำแท่ง ขายออก",
+                    "xpath": "(//tr[td[normalize-space()='ทองคำแท่ง']])[1]/td[3]"
+                },
+                {
+                    "type": "get",
+                    "name": "ทองรูปพรรณ รับซื้อ",
+                    "xpath": "(//tr[td[normalize-space()='ทองรูปพรรณ']])[1]/td[2]"
+                },
+                {
+                    "type": "get",
+                    "name": "ทองรูปพรรณ ขายออก",
+                    "xpath": "(//tr[td[normalize-space()='ทองรูปพรรณ']])[1]/td[3]"
+                },
+                {
+                    "type": "get",
+                    "name": "เปลี่ยนแปลงวันนี้",
+                    "xpath": "(//tr[td[starts-with(normalize-space(), 'วันนี้')]])[1]/td[3]"
+                }
+            ]
+        }
+    ]
+}
