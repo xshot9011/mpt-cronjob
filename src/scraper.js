@@ -2,6 +2,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { executeActions } from "./actions.js";
 import { humanizeMouse, launchContext, newContext } from "./browser.js";
+import { recordTurnstileCallbacks, wantsTurnstileCallback } from "./captcha.js";
 import { passChallenge } from "./challenge.js";
 import { getLogger } from "./logger.js";
 import { isLambda, randomInt, sleep, targetName, toBool } from "./util.js";
@@ -23,7 +24,10 @@ export function normalizeUrl(url) {
  */
 export async function scrapeTarget(page, name, url, actions, { waitTimeout, actionWait, challengeTimeout }) {
     const targetLogger = getLogger(name);
+    let turnstileHook = null;
     try {
+        // Only for this target, removed after it, so other targets' pages stay unpatched.
+        if (wantsTurnstileCallback(actions)) turnstileHook = await page.addInitScript(recordTurnstileCallbacks);
         targetLogger.info(`Initiating extraction from ${url}`);
         const response = await page.goto(normalizeUrl(url), { waitUntil: "domcontentloaded", timeout: 60_000 });
         if (!(await passChallenge(page, response, challengeTimeout, targetLogger))) {
@@ -73,6 +77,8 @@ export async function scrapeTarget(page, name, url, actions, { waitTimeout, acti
     } catch (e) {
         targetLogger.error(`An unexpected error occurred: ${e.message}`);
         return { results: [], blocked: false };
+    } finally {
+        await turnstileHook?.dispose().catch(() => {});
     }
 }
 

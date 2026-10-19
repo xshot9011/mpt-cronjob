@@ -98,6 +98,67 @@ function fireRecaptchaCallback(token) {
     }
 }
 
+/**
+ * True when a target's actions hand a Turnstile token to the page's callback
+ * (`solve_captcha` with `captcha_type: "turnstile"` and `invoke_callback`).
+ * Only such targets get the recordTurnstileCallbacks init script.
+ */
+export function wantsTurnstileCallback(actions) {
+    return actions.some((a) => a?.type === "solve_captcha"
+        && String(a.captcha_type).toLowerCase() === "turnstile"
+        && toBool(a.invoke_callback));
+}
+
+/**
+ * Init script (runs before the page's own scripts): records the `callback` the
+ * page passes to turnstile.render. Forms that take the token from that callback
+ * (Angular/React form controls) ignore a token written into the hidden
+ * cf-turnstile-response input, and the callback is unreachable once rendered.
+ * Serialized into the page, so it must not reference outer variables.
+ */
+export function recordTurnstileCallbacks() {
+    const callbacks = [];
+    Object.defineProperty(window, "__turnstileCallbacks", { value: callbacks });
+    const wrap = (api) => {
+        if (!api || typeof api.render !== "function") return api;
+        const render = api.render;
+        const recording = function (container, params) {
+            if (typeof params?.callback === "function") callbacks.push(params.callback);
+            return render.apply(this, arguments);
+        };
+        api.render = recording;
+        // A frozen API object ignores the assignment: hand out a copy instead.
+        return api.render === recording ? api : { ...api, render: recording };
+    };
+    let api;
+    Object.defineProperty(window, "turnstile", {
+        configurable: true,
+        enumerable: true,
+        get: () => api,
+        set: (value) => { api = wrap(value); },
+    });
+}
+
+// Hands the token to every recorded Turnstile callback, plus the callback an
+// implicitly rendered widget names in data-callback. Returns how many ran.
+function fireTurnstileCallbacks(token) {
+    const callbacks = new Set(window.__turnstileCallbacks || []);
+    for (const el of document.querySelectorAll(".cf-turnstile[data-callback]")) {
+        const fn = window[el.getAttribute("data-callback")];
+        if (typeof fn === "function") callbacks.add(fn);
+    }
+    let fired = 0;
+    for (const callback of callbacks) {
+        try {
+            callback(token);
+            fired++;
+        } catch {
+            // ignore a broken callback and try the next one
+        }
+    }
+    return fired;
+}
+
 async function capsolverPost(endpoint, payload) {
     const base = process.env.CAPSOLVER_API_BASE || "https://api.capsolver.com";
     const response = await fetch(`${base}/${endpoint}`, {
@@ -205,6 +266,16 @@ export async function solveCaptchaOnPage(page, action, logger, step) {
             logger.info(fired ? "reCAPTCHA callback fired." : "No reCAPTCHA callback found to fire.");
         } catch (e) {
             logger.warning(`reCAPTCHA callback invocation failed: ${e.message}`);
+        }
+    }
+
+    if (toBool(action.invoke_callback) && captchaType === "turnstile") {
+        try {
+            const fired = await page.evaluate(fireTurnstileCallbacks, token);
+            if (fired) logger.info(`Turnstile callback fired (${fired}).`);
+            else logger.warning("No Turnstile callback was recorded; the token is only in cf-turnstile-response.");
+        } catch (e) {
+            logger.warning(`Turnstile callback invocation failed: ${e.message}`);
         }
     }
 }

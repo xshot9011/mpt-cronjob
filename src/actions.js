@@ -1,6 +1,6 @@
 import { enterFrame, evalScript, humanizeMouse } from "./browser.js";
 import { solveCaptchaOnPage } from "./captcha.js";
-import { passChallenge } from "./challenge.js";
+import { passChallenge, passTurnstile } from "./challenge.js";
 import { parseDuration, resolveValue } from "./resolve.js";
 import { sleep, toBool } from "./util.js";
 
@@ -22,10 +22,10 @@ function stringifyResult(value) {
  * Execute a list of actions sequentially. Returns one entry per `get` action:
  * { value, options, name? }, or null when that extraction failed.
  *
- * A failing click/fill/switch_path/solve_captcha stops the remaining actions
- * unless the action sets continue_on_failure. A switch_path landing on a
- * Cloudflare challenge that doesn't clear within `challengeTimeout` seconds
- * counts as failing.
+ * A failing click/fill/switch_path/solve_captcha/click_turnstile stops the
+ * remaining actions unless the action sets continue_on_failure. A switch_path
+ * landing on a Cloudflare challenge that doesn't clear within
+ * `challengeTimeout` seconds counts as failing.
  */
 export async function executeActions(page, logger, actions, actionWait, challengeTimeout = 15) {
     const extracted = [];
@@ -88,6 +88,20 @@ export async function executeActions(page, logger, actions, actionWait, challeng
                 await sleep(actionWait);
             } catch (e) {
                 if (carryOn("CAPTCHA solving", e)) continue;
+                return extracted;
+            }
+            continue;
+        }
+
+        if (type === "click_turnstile") {
+            try {
+                const timeout = parseDuration(action.timeout ?? 30);
+                logger.info(`Step ${step}: Waiting up to ${timeout}s for the Turnstile widget to pass...`);
+                await passTurnstile(page, timeout, logger, step);
+                logger.info(`Step ${step}: Turnstile passed. Waiting ${actionWait}s...`);
+                await sleep(actionWait);
+            } catch (e) {
+                if (carryOn("Turnstile", e)) continue;
                 return extracted;
             }
             continue;
