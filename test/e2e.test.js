@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { chromium } from "playwright";
-import { executeActions } from "../src/actions.js";
+import { executeActions, logPageState } from "../src/actions.js";
 import { handler } from "../src/lambda.js";
 import { runAll, scrapeTarget } from "../src/scraper.js";
 
@@ -109,6 +109,31 @@ test("click_turnstile stops the remaining actions when the widget never passes",
         { type: "get", name: "never_reached", script: "return 'nope'" },
     ], 0);
     assert.deepEqual(results, []);
+});
+
+test("a step that stops the run logs the page it failed on", { skip: browserMissing, timeout: 60_000 }, async (t) => {
+    const browser = await chromium.launch({ headless: true });
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    await page.goto(FIXTURE_URL);
+    const errors = [];
+    const logger = { ...silent, error: (message) => errors.push(message) };
+
+    const results = await executeActions(page, logger, [
+        { type: "click", script: "throw new Error('soft failure')", continue_on_failure: true },
+        { type: "click", script: "throw new Error('hard failure')" },
+        { type: "get", name: "never_reached", script: "return 'nope'" },
+    ], 0);
+    assert.deepEqual(results, []);
+    // Only the failure that stopped the run dumps the page.
+    assert.deepEqual(errors, [
+        "Step 1: Click failed: soft failure",
+        "Step 2: Click failed: hard failure",
+        `Step 2: Page at failure: ${FIXTURE_URL} (title: 'Fixture Page'). Visible text: Fixture Click me Clicks: 0`,
+    ]);
+
+    await logPageState(page, logger, 3, 7);
+    assert.equal(errors.at(-1), `Step 3: Page at failure: ${FIXTURE_URL} (title: 'Fixture Page'). Visible text: Fixture...`);
 });
 
 test("solve_captcha hands a Turnstile token to the callback the page passed to turnstile.render", { skip: browserMissing, timeout: 60_000 }, async (t) => {
