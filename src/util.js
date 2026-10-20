@@ -25,6 +25,21 @@ export function plainNumber(value) {
 export const digitCount = (number) => number.replace(/\D/g, "").length;
 
 /**
+ * A plainNumber() string rounded half away from zero to at most `decimals`
+ * places, without trailing zeros ("603.472265344", 8 -> "603.47226534";
+ * "1.999", 2 -> "2"). Worked on the digits, so no float error creeps in.
+ */
+export function roundDecimals(number, decimals) {
+    const negative = number.startsWith("-");
+    const [whole, fraction = ""] = number.replace(/^-/, "").split(".");
+    let scaled = BigInt(whole + fraction.padEnd(decimals, "0").slice(0, decimals));
+    if ((fraction[decimals] ?? "0") >= "5") scaled += 1n;
+    const digits = scaled.toString().padStart(decimals + 1, "0");
+    const rounded = decimals === 0 ? digits : `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}`.replace(/\.?0+$/, "");
+    return negative && /[1-9]/.test(rounded) ? `-${rounded}` : rounded;
+}
+
+/**
  * What's wrong with a target's `columns` option ({ "<field>": "<column>" }),
  * or null. `reserved` are the columns the output writes itself; mapping a
  * field to one is refused with "column '<name>' <why>."

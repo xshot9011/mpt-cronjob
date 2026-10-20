@@ -18,6 +18,7 @@ import { getSecret } from "../src/secrets.js";
 import { buildSheetsRecords, placeRecord, toSheetsCell } from "../src/sheets.js";
 import { signRequest } from "../src/sigv4.js";
 import { buildTelegramMessage } from "../src/telegram.js";
+import { roundDecimals } from "../src/util.js";
 import { toBool } from "../src/util.js";
 
 const silent = { debug() {}, info() {}, warning() {}, error() {} };
@@ -808,6 +809,27 @@ test("toSheetsCell writes plain numbers as numbers, up to the 15 digits Sheets k
     }
 });
 
+test("roundDecimals rounds half away from zero on the digits and drops trailing zeros", () => {
+    assert.equal(roundDecimals("603.472265344022888304", 8), "603.47226534");
+    assert.equal(roundDecimals("603.47226534", 8), "603.47226534");
+    assert.equal(roundDecimals("0.999999995", 8), "1");
+    assert.equal(roundDecimals("1.005", 2), "1.01"); // (1.005).toFixed(2) gives "1.00"
+    assert.equal(roundDecimals("-2.345", 2), "-2.35");
+    assert.equal(roundDecimals("-0.000000001", 8), "0");
+    assert.equal(roundDecimals("0.00000001", 8), "0.00000001");
+    assert.equal(roundDecimals("66100.00", 2), "66100");
+    assert.equal(roundDecimals("100", 8), "100");
+    assert.equal(roundDecimals("2.5", 0), "3");
+    assert.equal(roundDecimals("1000", 0), "1000");
+});
+
+test("toSheetsCell with decimals rounds numbers before the 15-digit check and leaves text alone", () => {
+    assert.equal(toSheetsCell("603.472265344022888304", 8), 603.47226534);
+    assert.equal(toSheetsCell("1,234.5", 8), 1234.5);
+    assert.equal(toSheetsCell("12345678901234.567", 2), "12345678901234.57");
+    assert.equal(toSheetsCell("17 ต.ค. 2569", 8), "17 ต.ค. 2569");
+});
+
 test("buildSheetsRecords: only the mapped fields with 'columns', every field without; missing values are warned", () => {
     const logger = recordingLogger();
     const records = buildSheetsRecords([
@@ -838,6 +860,19 @@ test("buildSheetsRecords: only the mapped fields with 'columns', every field wit
     assert.ok(logger.lines.includes("WARNING Google Sheets: no value for 'Empty' field(s) volume; those cells are left empty."));
 });
 
+test("buildSheetsRecords: a target's decimals rounds only that target's numbers", () => {
+    const records = buildSheetsRecords([
+        result("GoMining", "tokens", "603.472265344022888304"),
+        result("GoMining", "note", "ok"),
+        result("Other", "tokens", "603.472265344"),
+    ], new Map([["GoMining", { decimals: 8 }], ["Other", {}]]), NOW, recordingLogger());
+
+    assert.deepEqual(records.map(({ record }) => [...record].slice(2)), [
+        [["tokens", 603.47226534], ["note", "ok"]],
+        [["tokens", 603.472265344]],
+    ]);
+});
+
 test("placeRecord puts cells under their header names and adds missing names to the end", () => {
     const record = new Map([["scraped_at", "now"], ["target", "Gold"], ["price", 1], ["new", "x"]]);
     // Existing headers keep their places; a repeated name uses its first column.
@@ -855,8 +890,16 @@ test("google_sheets checks: tab and columns per target (400 from the event, 500 
     );
     const at = "Target 'Gold', output 'sheets':";
     const noTab = `${at} needs a 'tab', on the target's entry or on the output.`;
-    fails(WITH_SHEETS, [{ name: "sheets", colums: {} }], true, 400, `${at} unknown option(s) colums (google_sheets takes 'tab' and 'columns').`);
+    fails(WITH_SHEETS, [{ name: "sheets", colums: {} }], true, 400,
+        `${at} unknown option(s) colums (google_sheets takes 'tab', 'columns' and 'decimals').`);
     fails(WITH_SHEETS, [{ name: "sheets", tab: "" }], false, 500, `${at} 'tab' must be a non-empty string.`);
+    for (const decimals of ["8", -1, 1.5, 16, null]) {
+        fails(WITH_SHEETS, [{ name: "sheets", decimals }], true, 400, `${at} 'decimals' must be a whole number from 0 to 15.`);
+    }
+    assert.deepEqual(
+        routeOutputs(WITH_SHEETS, [target("Gold", [{ name: "sheets", decimals: 8 }])], undefined).get("Gold"),
+        [["sheets", SHEETS, { decimals: 8 }]],
+    );
     fails(WITH_SHEETS, [{ name: "sheets", columns: {} }], true, 400, `${at} 'columns' must map field names to column names.`);
     fails(WITH_SHEETS, [{ name: "sheets", columns: { price: "target" } }], true, 400,
         `${at} column 'target' is reserved (every row starts with scraped_at and target).`);

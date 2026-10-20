@@ -1,6 +1,6 @@
 import { a1Range, appendValues, columnLetters, getValues, sheetTitles, updateValues } from "./google.js";
 import { resolveValue } from "./resolve.js";
-import { checkColumns, digitCount, isName, plainNumber } from "./util.js";
+import { checkColumns, digitCount, isName, plainNumber, roundDecimals } from "./util.js";
 
 /** Every row starts with these columns, so `columns` can't write them. */
 const RESERVED = ["scraped_at", "target"];
@@ -19,40 +19,49 @@ export function checkSheetsOutput(output) {
 
 /**
  * What's wrong with the options a target gives a google_sheets output, or null:
- *   { "name": "sheets", "tab": "<tab>", "columns": { "<get action name>": "<column>" } }
+ *   { "name": "sheets", "tab": "<tab>", "columns": { "<get action name>": "<column>" }, "decimals": 8 }
  * The target's `tab` wins over the output's; one of them must be set.
+ * `decimals` goes up to the 15 digits Sheets keeps.
  */
 export function checkSheetsRoute(options, output) {
-    const { tab, columns, ...rest } = options;
+    const { tab, columns, decimals, ...rest } = options;
     const unknown = Object.keys(rest);
-    if (unknown.length > 0) return `unknown option(s) ${unknown.join(", ")} (google_sheets takes 'tab' and 'columns').`;
+    if (unknown.length > 0) return `unknown option(s) ${unknown.join(", ")} (google_sheets takes 'tab', 'columns' and 'decimals').`;
     if (tab !== undefined && !isName(tab)) return "'tab' must be a non-empty string.";
     if (tab === undefined && output.tab === undefined) return "needs a 'tab', on the target's entry or on the output.";
+    if (decimals !== undefined && !(Number.isInteger(decimals) && decimals >= 0 && decimals <= 15)) {
+        return "'decimals' must be a whole number from 0 to 15.";
+    }
     if (columns === undefined) return null;
     return checkColumns(columns, RESERVED, "is reserved (every row starts with scraped_at and target)");
 }
 
 /**
  * A scraped value as a cell: a plain number ("66,100.00") as a JSON number,
- * anything else as the scraped string. Numbers of more than 15 digits stay
- * strings, since Sheets stores doubles and would round them.
+ * first rounded to `decimals` places when given, anything else as the scraped
+ * string. Numbers of more than 15 digits stay strings, since Sheets stores
+ * doubles and would round them; a rounded one stays its rounded text.
  */
-export function toSheetsCell(value) {
+export function toSheetsCell(value, decimals) {
     const number = plainNumber(value);
-    return number !== null && digitCount(number) <= 15 ? Number(number) : String(value);
+    if (number === null) return String(value);
+    const rounded = decimals === undefined ? number : roundDecimals(number, decimals);
+    if (digitCount(rounded) <= 15) return Number(rounded);
+    return decimals === undefined ? String(value) : rounded;
 }
 
 /**
  * One record per target: scraped_at (`now`, ISO 8601 UTC), target, then one
  * cell per value. With `columns`, only the mapped fields are written, under
  * the mapped names; without, every field is written under its own name. A
- * `get` without a name is the field "value". Targets with nothing to write
- * are left out. Returns [{ target, record: Map<column, cell> }].
+ * `get` without a name is the field "value". With `decimals`, every number
+ * the target writes is rounded to that many places. Targets with nothing to
+ * write are left out. Returns [{ target, record: Map<column, cell> }].
  */
 export function buildSheetsRecords(results, optionsByTarget, now, logger) {
     const records = [];
     for (const [target, targetResults] of Map.groupBy(results, (r) => r.target)) {
-        const columns = optionsByTarget.get(target)?.columns;
+        const { columns, decimals } = optionsByTarget.get(target) ?? {};
         const record = new Map([["scraped_at", now.toISOString()], ["target", target]]);
         const written = new Set();
         for (const { field = "value", value } of targetResults) {
@@ -62,7 +71,7 @@ export function buildSheetsRecords(results, optionsByTarget, now, logger) {
                 logger.warning(`Google Sheets: '${target}' field '${field}' not written: '${column}' is a reserved column.`);
                 continue;
             }
-            record.set(column, toSheetsCell(value));
+            record.set(column, toSheetsCell(value, decimals));
             written.add(field);
         }
         const missing = Object.keys(columns ?? {}).filter((f) => !written.has(f));
