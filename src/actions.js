@@ -161,8 +161,9 @@ export async function executeActions(page, logger, actions, actionWait, challeng
                     try {
                         await locator.click({ timeout: 15_000 });
                         await humanizeMouse(page, 2);
-                    } catch {
-                        logger.warning(`Step ${step}: Standard click failed, using Javascript fallback.`);
+                    } catch (err) {
+                        // The reason (e.g. "<div …> intercepts pointer events") is in Playwright's call log
+                        logger.warning(`Step ${step}: Standard click failed, using Javascript fallback: ${err?.message ?? err}`);
                         await locator.evaluate((el) => el.click());
                     }
                     logger.info(`Step ${step}: Click successful. Waiting ${actionWait}s...`);
