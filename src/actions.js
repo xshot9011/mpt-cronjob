@@ -52,8 +52,11 @@ export async function executeActions(page, logger, actions, actionWait, challeng
         if (type === "switch_path") {
             try {
                 const destination = buildSwitchPathUrl(page.url(), action.path ?? "");
-                logger.info(`Step ${step}: Switching path to '${destination}'...`);
-                const response = await page.goto(destination, { waitUntil: "domcontentloaded" });
+                // Defaults to the target's first-load budget; the 15s context default is
+                // too tight for a heavy SPA on a CPU-starved Lambda.
+                const timeout = parseDuration(action.timeout ?? 60);
+                logger.info(`Step ${step}: Switching path to '${destination}' (timeout ${timeout}s)...`);
+                const response = await page.goto(destination, { waitUntil: "domcontentloaded", timeout: timeout * 1000 });
                 if (!(await passChallenge(page, response, challengeTimeout, logger))) {
                     throw new Error(`blocked by a Cloudflare challenge that did not clear within ${challengeTimeout}s`);
                 }
