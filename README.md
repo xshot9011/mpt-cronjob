@@ -311,7 +311,7 @@ An output is a named destination for results. Destinations and credentials live 
 - **One message per output**: each output gets one batch per run, with the results of every target that names it.
 - **The event's `outputs`** (EventBridge, console, CLI or HTTP body) limits a run to those names: `{ "outputs": ["telegram-alert"] }` drops every other output for that run, and `{ "outputs": [] }` sends nothing at all. Useful for test runs. Without it, each target uses all the outputs it names.
 - **Targets sent in the event** (a cronjob's `targets`) carry their own `outputs` the same way.
-- **Per-target options**: an entry in a target's `outputs` can be `{ "name": "<output>", ...options }` instead of a plain name, to set options for that target only. `dynamodb` takes `columns` (see [DynamoDB](#dynamodb)), and `google_sheets` takes `tab` and `columns` (see [Google Sheets](#google-sheets)).
+- **Per-target options**: an entry in a target's `outputs` can be `{ "name": "<output>", ...options }` instead of a plain name, to set options for that target only. `dynamodb` takes `columns` (see [DynamoDB](#dynamodb)), and `google_sheets` takes `tab`, `columns` and `decimals` (see [Google Sheets](#google-sheets)).
 - **Validation** happens before scraping:
   - An unknown output name, `outputs` that isn't a list of names or `{ "name": ... }` objects, or options the output doesn't accept refuses the run. That's a `400` when the event sent it (in its `outputs` or its `targets`), and a `500` when it comes from the configured targets.
   - An output with an unknown `type` or a bad definition (such as a `dynamodb` output without a `table`, or a `google_sheets` output without a `private_key`) fails every run with `500`.
@@ -325,7 +325,7 @@ Output types:
 |--------|--------|--------------|
 | `telegram` | `bot_token`, `chat_id` (both support `secret_manager[...]`) | Posts one message with the results routed to it. If either value resolves empty, a warning is logged and nothing is sent. |
 | `dynamodb` | `table` (supports `secret_manager[...]`); optional `partition_key` (default `target`), `sort_key` (default `scraped_at`, `null` for none), `region` (default: the config's) | Writes one item per target routed to it. Each target's `columns` choose which values go in and under which column names. See [DynamoDB](#dynamodb). |
-| `google_sheets` | `spreadsheet_id`, `client_email`, `private_key`, optional `tab` (all support `secret_manager[...]`) | Appends one row per target routed to it, placing each value under its column name in the tab's header row. Each target can set its own `tab` and `columns`. See [Google Sheets](#google-sheets). |
+| `google_sheets` | `spreadsheet_id`, `client_email`, `private_key`, optional `tab` (all support `secret_manager[...]`) | Appends one row per target routed to it, placing each value under its column name in the tab's header row. Each target can set its own `tab`, `columns` and `decimals`. See [Google Sheets](#google-sheets). |
 
 A new type is one sender function registered in `SENDERS` in [src/outputs.js](src/outputs.js), plus checks in `CHECKS` if it has a definition to validate or takes per-target options. Each result it receives carries its `target` name and its `field` (the `get` action's `name`); the routing rules don't change.
 
@@ -407,8 +407,9 @@ Each run appends one row per target to its tab, for example:
 - **`columns`** works as for DynamoDB: only the mapped fields are written, under the mapped names. Name the output without `columns` to write every field under its own name. A `get` without a `name` counts as the field `value`. `scraped_at` and `target` are reserved.
 - **Header row**: row 1 of the tab holds the column names, and each value goes in the column with its name. If row 1 is empty, the header is written first. Names missing from the header are added to its end. Existing headers are never moved or renamed, so you can rearrange columns or add your own; columns the output doesn't write stay empty in new rows.
 - **Values**: a plain number (`66,100.00`) is written as a number, without the thousands separators, when it has at most 15 digits (what Sheets can store exactly). Anything else is written as text, and so is `scraped_at` (ISO 8601, UTC). Every write uses `valueInputOption=RAW`, so scraped text such as `=IMPORTXML(...)` stays text and never becomes a formula.
+- **`decimals`**: a target's `"decimals": 8` rounds every number it writes to that tab to 8 places, half away from zero, before the 15-digit check: `603.472265344022888304` (21 digits, so text without it) is written as the number `603.47226534`. The rounding works on the digits, so no float error creeps in. Text values are written as scraped, and the target's other outputs (Telegram, DynamoDB) still get the full value. How many places the sheet shows is up to the column's number format.
 - **Missing values**: a mapped field with no value is logged as a warning and its cell is left empty. A target with nothing to write gets no row.
-- **Validation**: `tab` must be a non-empty string, and `columns` follows the DynamoDB rules. See the [validation rules](#-outputs) above for `400` vs `500`.
+- **Validation**: `tab` must be a non-empty string, `decimals` a whole number from 0 to 15, and `columns` follows the DynamoDB rules. See the [validation rules](#-outputs) above for `400` vs `500`.
 - **Failures**: one target failing (a missing tab, a protected range) is logged; the other targets are still appended. Each run logs `Appended N row(s) to Google Sheet <id>.`
 - **Auth**: the service-account JWT is signed in-process and exchanged for an access token. The token is cached until 5 minutes before it expires, so warm Lambda invocations reuse it. The key, the JWT and the token are never logged.
 
