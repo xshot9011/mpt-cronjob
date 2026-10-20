@@ -119,24 +119,24 @@ export function wantsTurnstileCallback(actions) {
 export function recordTurnstileCallbacks() {
     const callbacks = [];
     Object.defineProperty(window, "__turnstileCallbacks", { value: callbacks });
-    const wrap = (api) => {
-        if (!api || typeof api.render !== "function") return api;
+    // Don't define window.turnstile ahead of api.js: it checks `"turnstile" in
+    // window` and, finding it, skips loading as if loaded twice. Wrap render
+    // once a script has defined it instead: a script's load event fires right
+    // after it runs, before api.js calls the page's onload callback on a timer.
+    let recording = null;
+    const wrap = () => {
+        const api = window.turnstile;
+        if (typeof api?.render !== "function" || api.render === recording) return;
         const render = api.render;
-        const recording = function (container, params) {
+        recording = function (container, params) {
             if (typeof params?.callback === "function") callbacks.push(params.callback);
             return render.apply(this, arguments);
         };
         api.render = recording;
-        // A frozen API object ignores the assignment: hand out a copy instead.
-        return api.render === recording ? api : { ...api, render: recording };
     };
-    let api;
-    Object.defineProperty(window, "turnstile", {
-        configurable: true,
-        enumerable: true,
-        get: () => api,
-        set: (value) => { api = wrap(value); },
-    });
+    document.addEventListener("load", (e) => {
+        if (e.target instanceof HTMLScriptElement) wrap();
+    }, true);
 }
 
 // Hands the token to every recorded Turnstile callback, plus the callback an

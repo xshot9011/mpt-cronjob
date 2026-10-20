@@ -127,18 +127,25 @@ test("solve_captcha hands a Turnstile token to the callback the page passed to t
     const browser = await chromium.launch({ headless: true });
     t.after(() => browser.close());
     const page = await browser.newPage();
-    // Stands in for Turnstile's api.js. Frozen, the harder case for the recorder.
+    // Stands in for Turnstile's api.js. Like the real one, it refuses to load
+    // when "turnstile" is already in window, and calls the page's onload
+    // callback on a timer after it runs.
     await page.route("https://challenges.cloudflare.com/turnstile/v0/api.js*", (route) => route.fulfill({
         contentType: "text/javascript",
         body: `
-            window.turnstile = Object.freeze({
-                render(container) {
-                    const input = Object.assign(document.createElement("input"), { type: "hidden", name: "cf-turnstile-response" });
-                    document.querySelector(container).appendChild(input);
-                    return "widget-0";
-                },
-            });
-            window[new URL(document.currentScript.src).searchParams.get("onload")]();
+            if ("turnstile" in window) {
+                console.warn("Turnstile already has been loaded.");
+            } else {
+                window.turnstile = {
+                    render(container) {
+                        const input = Object.assign(document.createElement("input"), { type: "hidden", name: "cf-turnstile-response" });
+                        document.querySelector(container).appendChild(input);
+                        return "widget-0";
+                    },
+                };
+            }
+            const onload = new URL(document.currentScript.src).searchParams.get("onload");
+            setTimeout(() => window[onload](), 0);
         `,
     }));
 
@@ -149,8 +156,12 @@ test("solve_captcha hands a Turnstile token to the callback the page passed to t
     };
     const formToken = { type: "get", name: "token", xpath: "//p[@id='form-token']" };
 
-    const handed = await scrapeTarget(page, "Form", TURNSTILE_FORM_URL, [{ ...solve, invoke_callback: true }, formToken], timing);
-    assert.deepEqual(handed.results.map((r) => r.value), ["capsolver-token"]);
+    const handed = await scrapeTarget(page, "Form", TURNSTILE_FORM_URL, [
+        { ...solve, invoke_callback: true },
+        formToken,
+        { type: "get", name: "widgets", script: "return document.querySelectorAll('[name=\"cf-turnstile-response\"]').length" },
+    ], timing);
+    assert.deepEqual(handed.results.map((r) => r.value), ["capsolver-token", "1"]);
     assert.deepEqual(tasks, [{
         type: "AntiTurnstileTaskProxyLess", websiteURL: TURNSTILE_FORM_URL, websiteKey: "0x4AAAAAAAfixture", metadata: { action: "login" },
     }]);
