@@ -433,7 +433,7 @@ Every action accepts `continue_on_failure` (default `false`). When a `click`, `f
 | `fill` | `xpath`, `value_from`, optional `iframe_title` | Clears the field and types the resolved value. |
 | `get` | `xpath` **or** `script`, optional `name`, `iframe_title`, `telegram_message_options` | Extracts the element's text, or the script's `return` value. Each `get` becomes one result. |
 | `sleep` | `duration` (`5`, `"5s"`, `"2m"`, `"1h"`) | Waits. |
-| `switch_path` | `path` | Navigates to another path on the current site, e.g. `"/dashboard"`. |
+| `switch_path` | `path`, optional `timeout` (default `60`) | Navigates to another path on the current site, e.g. `"/dashboard"`. Fails when the page hasn't loaded after `timeout` (`90` / `"90s"` / `"2m"`). |
 | `solve_captcha` | see below | Solves a CAPTCHA via CapSolver and injects the token. |
 | `click_turnstile` | optional `timeout` (default `30`) | Waits for the page's Cloudflare Turnstile widget (the "Verify you are human" box in a login form) to pass, clicking its checkbox when it doesn't pass by itself, and retrying a click that doesn't take. Fails when the widget still has no token after `timeout`. Place it before the submit `click`: forms like this ignore the submit until the widget has passed. |
 
