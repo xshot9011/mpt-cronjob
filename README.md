@@ -425,7 +425,7 @@ No new AWS IAM permission is needed beyond `secretsmanager:GetSecretValue` on th
 
 ## 🎬 Actions
 
-Every action accepts `continue_on_failure` (default `false`). When a `click`, `fill`, `switch_path` or `solve_captcha` fails, the remaining actions of that target are skipped unless this is set.
+Every action accepts `continue_on_failure` (default `false`). When a `click`, `fill`, `switch_path`, `solve_captcha` or `click_turnstile` fails, the remaining actions of that target are skipped unless this is set.
 
 | `type` | Fields | What it does |
 |--------|--------|--------------|
@@ -435,6 +435,7 @@ Every action accepts `continue_on_failure` (default `false`). When a `click`, `f
 | `sleep` | `duration` (`5`, `"5s"`, `"2m"`, `"1h"`) | Waits. |
 | `switch_path` | `path` | Navigates to another path on the current site, e.g. `"/dashboard"`. |
 | `solve_captcha` | see below | Solves a CAPTCHA via CapSolver and injects the token. |
+| `click_turnstile` | optional `timeout` (default `30`) | Waits for the page's Cloudflare Turnstile widget (the "Verify you are human" box in a login form) to pass, clicking its checkbox when it doesn't pass by itself, and retrying a click that doesn't take. Fails when the widget still has no token after `timeout`. Place it before the submit `click`: forms like this ignore the submit until the widget has passed. |
 
 How the fields work:
 - **`script` snippets** use `return ...` to produce a value, and may use `await`.
@@ -469,11 +470,30 @@ The `solve_captcha` action solves a CAPTCHA via [CapSolver](https://capsolver.co
 | `website_key` | no | The CAPTCHA site key. If omitted or `null`, it is auto-detected from the page (the `data-sitekey` attribute or the widget iframe). Provide it explicitly if auto-detection fails. |
 | `website_url` | no | Defaults to the current page URL. |
 | `page_action` | no | For `recaptcha_v3`, the action name (e.g. `login`). For `turnstile`, it is passed as `metadata.action`. |
-| `invoke_callback` | no | Best-effort firing of the reCAPTCHA JS callback after injection (reCAPTCHA only). Default `false`. |
+| `invoke_callback` | no | After injection, best-effort hand the token to the page's JS callback (reCAPTCHA and Turnstile). For Turnstile, see below. Default `false`. |
 | `timeout` | no | Max time to wait for CapSolver (`120` / `"120s"` / `"2m"`). Default 120s. |
 | `continue_on_failure` | no | If `true`, keep running the remaining actions when solving fails. Default `false`. |
 
 > ⚠️ Only use this against sites you are authorized to automate. CapSolver charges each solve to your prepaid balance.
+
+### Turnstile in a JavaScript form
+
+Many sites render Turnstile from their own JavaScript (`turnstile.render(...)`) and take the token only from the widget's `callback`, for example as an Angular or React form control. On these pages:
+
+- **The site key** isn't in a `data-sitekey` attribute, so auto-detection fails. Set `website_key`; it usually sits in the site's JavaScript bundle (it starts with `0x4`).
+- **The token** written into `cf-turnstile-response` is ignored, and the submit button stays disabled. Set `invoke_callback: true`: the target's page then gets a small script at load that records the callbacks passed to `turnstile.render`, and the token is handed to them after solving. The script is added only for targets with such an action, and removed when the target finishes. If no callback was recorded, the run logs a warning.
+- **`page_action`** must match the widget's `action`, if it has one.
+
+```json
+{
+    "type": "solve_captcha",
+    "captcha_type": "turnstile",
+    "api_key_from": "secret_manager['my-app-secrets']['CAPSOLVER_API_KEY']",
+    "website_key": "0x4AAAAAAA...",
+    "page_action": "login-email",
+    "invoke_callback": true
+}
+```
 
 ---
 

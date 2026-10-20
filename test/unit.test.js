@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { buildSwitchPathUrl } from "../src/actions.js";
 import { setAwsRegion } from "../src/aws.js";
 import { browserLaunchOptions, headfulUserAgent } from "../src/browser.js";
+import { wantsTurnstileCallback } from "../src/captcha.js";
 import { buildDynamoItems, toDynamoNumber } from "../src/dynamodb.js";
 import { a1Range, accessToken, columnLetters, googleErrorMessage, serviceAccountJwt } from "../src/google.js";
 import { apiKeyMatches, isHttpEvent, looksLikeHttpRequest, parseJsonBody } from "../src/http.js";
@@ -1100,4 +1101,11 @@ test("headfulUserAgent swaps HeadlessChrome for Chrome and keeps the rest", () =
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
     );
     assert.equal(headfulUserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"), null);
+});
+
+test("wantsTurnstileCallback: only a turnstile solve_captcha with invoke_callback gets the recorder", () => {
+    assert.equal(wantsTurnstileCallback([{ type: "solve_captcha", captcha_type: "Turnstile", invoke_callback: "true" }]), true);
+    assert.equal(wantsTurnstileCallback([{ type: "solve_captcha", captcha_type: "turnstile" }]), false);
+    assert.equal(wantsTurnstileCallback([{ type: "solve_captcha", captcha_type: "recaptcha_v2", invoke_callback: true }]), false);
+    assert.equal(wantsTurnstileCallback([{ type: "get", xpath: "//h1" }]), false);
 });
