@@ -11,6 +11,23 @@ export function buildSwitchPathUrl(currentUrl, path = "") {
     return `${protocol}//${host}${normalized}`;
 }
 
+/**
+ * Log where the page is and what it shows, so a failed run on Lambda (where
+ * nobody watches the browser) says what the scraper saw: a redirect back to
+ * the login form, an error banner, a button with other text than expected.
+ */
+export async function logPageState(page, logger, step, maxChars = 1000) {
+    try {
+        const title = await page.title();
+        const text = String(await page.evaluate(() => document.body?.innerText ?? ""))
+            .replace(/\s+/g, " ").trim();
+        const excerpt = text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
+        logger.error(`Step ${step}: Page at failure: ${page.url()} (title: '${title}'). Visible text: ${excerpt || "(none)"}`);
+    } catch (e) {
+        logger.warning(`Step ${step}: Could not read the page at failure: ${e.message}`);
+    }
+}
+
 // A script `get` may return any JSON-able value; the result is always a trimmed string.
 function stringifyResult(value) {
     if (value === undefined || value === null) return "";
@@ -36,9 +53,13 @@ export async function executeActions(page, logger, actions, actionWait, challeng
         const continueOnFailure = toBool(action.continue_on_failure);
 
         // Logs the failure; returns true when the run should carry on with the next action.
-        const carryOn = (what, err) => {
+        // A failure that stops the run also logs what the page showed.
+        const carryOn = async (what, err) => {
             logger.error(`Step ${step}: ${what} failed: ${err?.message ?? err}`);
-            if (!continueOnFailure) return false;
+            if (!continueOnFailure) {
+                await logPageState(page, logger, step);
+                return false;
+            }
             logger.warning(`Step ${step}: Continuing despite ${what} failure (continue_on_failure=true).`);
             return true;
         };
@@ -64,7 +85,7 @@ export async function executeActions(page, logger, actions, actionWait, challeng
                 await sleep(actionWait);
                 await humanizeMouse(page, 2);
             } catch (e) {
-                if (carryOn("switch_path", e)) continue;
+                if (await carryOn("switch_path", e)) continue;
                 return extracted;
             }
             continue;
@@ -90,7 +111,7 @@ export async function executeActions(page, logger, actions, actionWait, challeng
                 logger.info(`Step ${step}: CAPTCHA solved. Waiting ${actionWait}s...`);
                 await sleep(actionWait);
             } catch (e) {
-                if (carryOn("CAPTCHA solving", e)) continue;
+                if (await carryOn("CAPTCHA solving", e)) continue;
                 return extracted;
             }
             continue;
@@ -104,7 +125,7 @@ export async function executeActions(page, logger, actions, actionWait, challeng
                 logger.info(`Step ${step}: Turnstile passed. Waiting ${actionWait}s...`);
                 await sleep(actionWait);
             } catch (e) {
-                if (carryOn("Turnstile", e)) continue;
+                if (await carryOn("Turnstile", e)) continue;
                 return extracted;
             }
             continue;
@@ -148,7 +169,7 @@ export async function executeActions(page, logger, actions, actionWait, challeng
                     await sleep(actionWait);
                 }
             } catch (e) {
-                if (carryOn("Click", e)) continue;
+                if (await carryOn("Click", e)) continue;
                 return extracted;
             }
             continue;
@@ -179,7 +200,7 @@ export async function executeActions(page, logger, actions, actionWait, challeng
                 await humanizeMouse(page, 2);
                 await sleep(actionWait);
             } catch (e) {
-                if (carryOn("Fill", e)) continue;
+                if (await carryOn("Fill", e)) continue;
                 return extracted;
             }
             continue;
