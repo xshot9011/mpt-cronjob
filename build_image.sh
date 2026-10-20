@@ -37,17 +37,25 @@ IMAGE_TAG="latest"
 GIT_TAG=$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)
 
 # aws CLI picks up AWS_PROFILE from the env; placeholder keeps a local build working without creds.
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "YOUR_AWS_ACCOUNT_ID")
+# Its stderr goes to a file (not stdout, which must stay just the account ID) so a failure shows AWS's own reason.
+AWS_ERROR_FILE=$(mktemp)
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>"${AWS_ERROR_FILE}" || echo "YOUR_AWS_ACCOUNT_ID")
+AWS_ERROR=$(cat "${AWS_ERROR_FILE}")
+rm -f "${AWS_ERROR_FILE}"
 if [ "${AWS_ACCOUNT_ID}" = "YOUR_AWS_ACCOUNT_ID" ]; then
     # Fail before the build when the push could never work.
     if [ "${PUSH}" = "true" ]; then
         echo "AWS account not resolved for profile '${AWS_PROFILE:-default}', cannot push to ECR." >&2
+        echo "aws sts get-caller-identity failed with:" >&2
+        printf '%s\n' "${AWS_ERROR:-(no error output)}" | sed 's/^/  /' >&2
         echo "SSO session expired? Run: aws sso login --profile ${AWS_PROFILE:-default}" >&2
         echo "Or build only with PUSH=false." >&2
         usage
         exit 1
     fi
     echo "WARN: AWS account not resolved for profile '${AWS_PROFILE:-default}'. ECR tags will use a placeholder." >&2
+    echo "      aws sts get-caller-identity failed with:" >&2
+    printf '%s\n' "${AWS_ERROR:-(no error output)}" | sed 's/^/        /' >&2
     echo "      SSO session expired? Run: aws sso login --profile ${AWS_PROFILE:-default}" >&2
     usage
 fi
