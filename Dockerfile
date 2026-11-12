@@ -1,7 +1,9 @@
-# AWS Lambda Node.js base image (Amazon Linux 2023).
-# For tamper-evident, reproducible builds pin the digest rather than the tag:
-#   FROM public.ecr.aws/lambda/nodejs:24@sha256:<digest>
-FROM public.ecr.aws/lambda/nodejs:24
+# AWS Lambda Node.js 24 (Amazon Linux 2023)
+# AWS image release: 24.2026.11.12.19
+# Node.js version: v24.22.3
+# Pinned by SHA256 digest for reproducible builds.
+FROM public.ecr.aws/lambda/nodejs:24.2026.11.12.19@sha256:64864c65f7de029833a0a5e6b054c5102a65c67aa1e3105a060ec6891e239670
+
 
 # Install the AL2023 shared libraries Playwright's Chromium needs at runtime.
 RUN dnf install -y \
